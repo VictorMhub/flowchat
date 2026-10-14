@@ -8,7 +8,7 @@ type Props = {
   messages: ChatMessage[];
 }
 
-export function MessageLista({ messages}:Props) {
+export function MessageList({ messages}:Props) {
   const bottomRef = useRef<HTMLDivElement>
   (null);
   
