@@ -1,53 +1,69 @@
+import { chatRequestSchema } from "@/features/chat/schemas/message.schema";
+import { generateChatStream } from "@/server/ai/aiGateway";
+
 export async function POST(request: Request) {
-const { messages } = await request.json();
+  try {
+    const body: unknown = await request.json();
 
-const lastMessage = messages.at(-1)?.content ?? "";
+    const parsed = chatRequestSchema.safeParse(body);
 
-
-const response = `
-# Exemplo de resposta
-
-Aqui está um exemplo de **Markdown**.
-
-## Tecnologias utilizadas
-
-- Next.js 16
-- TypeScript
-- React
-- Tailwind CSS
-
-### Exemplo de código
-
-\`\`\`typescript
-const message: string = "Olá, mundo!";
-console.log(message);
-\`\`\`
-
-| Tecnologia | Finalidade |
-| --- | --- |
-| Next.js | Framework |
-| TypeScript | Tipagem |
-`;
-
-
-const encoder = new TextEncoder();
-
-const stream = new ReadableStream({
-  async start(controller) {
-    for (const word of response.split("")) {
-      if (request.signal.aborted) break;
-
-      controller.enqueue(encoder.encode(word + ""));
-
-      await new Promise((resolve) => setTimeout(resolve,100));
+    if (!parsed.success) {
+      return Response.json(
+        { error: "Mensagens inválidas." },
+        { status: 400 }
+      );
     }
-    controller.close();
-  },
-});
-return new Response(stream,{
-  headers:{
-    "Content-Type": "text/plain; charset=utf-8",
-    "Cache-Control": "no-cache",
-  },
-})
+
+    const { messages } = parsed.data;
+
+    if (messages.at(-1)?.role !== "user") {
+      return Response.json(
+        { error: "A última mensagem deve ser do usuário." },
+        { status: 400 }
+      );
+    }
+
+    const geminiStream = await generateChatStream(
+      messages,
+      request.signal
+    );
+
+    const encoder = new TextEncoder();
+
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        try {
+          for await (const chunk of geminiStream) {
+            if (request.signal.aborted) break;
+
+            const text = chunk.text;
+
+            if (text) {
+              controller.enqueue(encoder.encode(text));
+            }
+          }
+
+          controller.close();
+        } catch (error) {
+          console.error("Erro no streaming:", error);
+          controller.error(error);
+        }
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
+  } catch (error) {
+    console.error("Erro na API de chat:", error);
+
+    return Response.json(
+      { error: "Não foi possível gerar a resposta." },
+      { status: 500 }
+    );
+  }
 }
