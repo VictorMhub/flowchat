@@ -3,7 +3,32 @@ const { messages } = await request.json();
 
 const lastMessage = messages.at(-1)?.content ?? "";
 
-const response = `Você escreveu: ${lastMessage}. Esta é uma resposta simulada em streaming.`;
+
+const response = `
+# Exemplo de resposta
+
+Aqui está um exemplo de **Markdown**.
+
+## Tecnologias utilizadas
+
+- Next.js 16
+- TypeScript
+- React
+- Tailwind CSS
+
+### Exemplo de código
+
+\`\`\`typescript
+const message: string = "Olá, mundo!";
+console.log(message);
+\`\`\`
+
+| Tecnologia | Finalidade |
+| --- | --- |
+| Next.js | Framework |
+| TypeScript | Tipagem |
+`;
+
 
 const encoder = new TextEncoder();
 
