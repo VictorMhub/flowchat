@@ -1,8 +1,48 @@
 import { chatRequestSchema } from "@/features/chat/schemas/message.schema";
 import { generateChatStream } from "@/server/ai/aiGateway";
+import { chatRateLimit } from "@/server/security/rateLimit";
+
+export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
+    const forwardedFor = request.headers
+    .get("x-forwarded-for");
+    const ip = forwardedFor?.split(",")[0]?.trim();
+
+    if (!ip) {
+      return Response.json(
+        { erro: "Não foi possível identificar a origem."},
+        { status: 403 }
+      )
+    }
+
+    const result = await chatRateLimit.limit(ip);
+
+    if (!result.success){
+       return Response.json(
+        { error: "Limite de mensagens atingido. Tente novamente mais tarde."},
+        { status: 429,
+          headers: {
+            "Retry-After": String(
+              Math.max(1, Math.ceil((result.reset - Date.now()) / 1000)
+            )
+          ),
+          }
+        }
+       )
+    }
+
+    const contentLength = Number(
+      request.headers.get("content-length") ?? 0
+    );
+
+    if (contentLength > 100_000) {
+       return Response.json(
+        { error: "Requisição muito grande."},
+        { status: 413}
+       );
+    }
     const body: unknown = await request.json();
 
     const parsed = chatRequestSchema.safeParse(body);
