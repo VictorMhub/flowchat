@@ -8,59 +8,53 @@ export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
-    const forwardedFor = request.headers
-    .get("x-forwarded-for");
+    const forwardedFor = request.headers.get("x-forwarded-for");
     const ip = forwardedFor?.split(",")[0]?.trim();
 
     if (!ip) {
       return Response.json(
-        { erro: "Não foi possível identificar a origem."},
-        { status: 403 }
-      )
+        { erro: "Não foi possível identificar a origem." },
+        { status: 403 },
+      );
     }
     const session = await auth();
     if (!session?.user?.email) {
       return Response.json(
-        { error: "Usuário naõ autenticado."},
-        { status: 401 }
+        { error: "Usuário naõ autenticado." },
+        { status: 401 },
       );
     }
     const identifier = `user:${session.user.email.toLocaleLowerCase()}`;
 
     const result = await chatRateLimit.limit(identifier);
 
-    if (!result.success){
-       return Response.json(
-        { error: "Limite de mensagens atingido. Tente novamente mais tarde."},
-        { status: 429,
+    if (!result.success) {
+      return Response.json(
+        { error: "Limite de mensagens atingido. Tente novamente mais tarde." },
+        {
+          status: 429,
           headers: {
             "Retry-After": String(
-              Math.max(1, Math.ceil((result.reset - Date.now()) / 1000)
-            )
-          ),
-          }
-        }
-       )
+              Math.max(1, Math.ceil((result.reset - Date.now()) / 1000)),
+            ),
+          },
+        },
+      );
     }
 
-    const contentLength = Number(
-      request.headers.get("content-length") ?? 0
-    );
+    const contentLength = Number(request.headers.get("content-length") ?? 0);
 
     if (contentLength > 100_000) {
-       return Response.json(
-        { error: "Requisição muito grande."},
-        { status: 413}
-       );
+      return Response.json(
+        { error: "Requisição muito grande." },
+        { status: 413 },
+      );
     }
     const body: unknown = await request.json();
     const parsed = chatRequestSchema.safeParse(body);
 
     if (!parsed.success) {
-      return Response.json(
-        { error: "Mensagens inválidas." },
-        { status: 400 }
-      );
+      return Response.json({ error: "Mensagens inválidas." }, { status: 400 });
     }
 
     const { messages } = parsed.data;
@@ -68,14 +62,11 @@ export async function POST(request: Request) {
     if (messages.at(-1)?.role !== "user") {
       return Response.json(
         { error: "A última mensagem deve ser do usuário." },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
-    const geminiStream = await generateChatStream(
-      messages,
-      request.signal
-    );
+    const geminiStream = await generateChatStream(messages, request.signal);
 
     const encoder = new TextEncoder();
 
@@ -112,7 +103,7 @@ export async function POST(request: Request) {
 
     return Response.json(
       { error: "Não foi possível gerar a resposta." },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
