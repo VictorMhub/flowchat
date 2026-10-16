@@ -1,10 +1,9 @@
 import { chatRequestSchema } from "@/features/chat/schemas/message.schema";
 import { generateChatStream } from "@/server/ai/aiGateway";
 import { chatRateLimit } from "@/server/security/rateLimit";
+import { getCurrentUser } from "@/server/auth/getCurrentUser";
 
 import { auth } from "@/auth";
-
-export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
@@ -24,7 +23,13 @@ export async function POST(request: Request) {
         { status: 401 },
       );
     }
-    const identifier = `user:${session.user.email.toLocaleLowerCase()}`;
+    const user = await getCurrentUser();
+
+    if (!user) {
+      return Response.json({ error: "Não autorizado." }, { status: 401 });
+    }
+
+    const identifier = `user:${user.id}`;
 
     const result = await chatRateLimit.limit(identifier);
 
