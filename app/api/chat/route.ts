@@ -2,6 +2,8 @@ import { chatRequestSchema } from "@/features/chat/schemas/message.schema";
 import { generateChatStream } from "@/server/ai/aiGateway";
 import { chatRateLimit } from "@/server/security/rateLimit";
 
+import { auth } from "@/auth";
+
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
@@ -16,8 +18,16 @@ export async function POST(request: Request) {
         { status: 403 }
       )
     }
+    const session = await auth();
+    if (!session?.user?.email) {
+      return Response.json(
+        { error: "Usuário naõ autenticado."},
+        { status: 401 }
+      );
+    }
+    const identifier = `user:${session.user.email.toLocaleLowerCase()}`;
 
-    const result = await chatRateLimit.limit(ip);
+    const result = await chatRateLimit.limit(identifier);
 
     if (!result.success){
        return Response.json(
@@ -44,7 +54,6 @@ export async function POST(request: Request) {
        );
     }
     const body: unknown = await request.json();
-
     const parsed = chatRequestSchema.safeParse(body);
 
     if (!parsed.success) {
