@@ -1,4 +1,3 @@
-
 import "server-only";
 
 import { GoogleGenAI } from "@google/genai";
@@ -14,7 +13,7 @@ const ai = new GoogleGenAI({ apiKey });
 
 export async function generateChatStream(
   messages: ChatMessage[],
-  signal?: AbortSignal
+  signal?: AbortSignal,
 ) {
   const contents = messages.map((message) => ({
     role: message.role === "assistant" ? "model" : "user",

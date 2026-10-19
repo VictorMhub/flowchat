@@ -1,7 +1,6 @@
-
 "use client";
 
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect, use } from "react";
 import { streamChat } from "../services/chatClient";
 import type { ChatMessage, ChatStatus } from "../types/chat.types";
 
@@ -14,6 +13,10 @@ export function useChat() {
   const controllerRef = useRef<AbortController | null>(null);
   const messagesRef = useRef<ChatMessage[]>([]);
   const conversationIdRef = useRef<string | null>(null);
+  const [conversations, setConversations] = useState<
+    { id: string; title: string }[]
+  >([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   function updateMessages(nextMessages: ChatMessage[]) {
     messagesRef.current = nextMessages;
@@ -73,6 +76,8 @@ export function useChat() {
       if (id) {
         conversationIdRef.current = id;
         setConversationId(id);
+
+        void loadConversations();
       }
 
       setStatus("idle");
@@ -87,9 +92,7 @@ export function useChat() {
       if (controller.signal.aborted) {
         setStatus("idle");
       } else {
-        setError(
-          err instanceof Error ? err.message : "Erro inesperado.",
-        );
+        setError(err instanceof Error ? err.message : "Erro inesperado.");
         setStatus("error");
       }
     } finally {
@@ -101,6 +104,64 @@ export function useChat() {
     controllerRef.current?.abort();
   }
 
+  async function loadConversations() {
+    try {
+      setLoadingHistory(true);
+
+      const response = await fetch("/api/conversations");
+
+      if (!response.ok) {
+        throw new Error("Erro ao carregar histórico.");
+      }
+
+      const data = await response.json();
+      setConversations(data);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Erro inesperado.");
+    } finally {
+      setLoadingHistory(false);
+    }
+  }
+
+  async function selectConversation(id: string) {
+    if (controllerRef.current) return;
+
+    try {
+      setLoadingHistory(true);
+      setError(null);
+
+      const response = await fetch(`/api/conversations/${id}`);
+
+      if (!response.ok) {
+        throw new Error("Erro ao abrir conversa.");
+      }
+
+      const data = await response.json();
+
+      updateMessages(data.messages);
+      conversationIdRef.current = data.id;
+      setConversationId(data.id);
+      setStatus("idle");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erro inesperado.");
+    } finally {
+      setLoadingHistory(false);
+    }
+  }
+
+  function newConversation() {
+    if (controllerRef.current) return;
+    updateMessages([]);
+    conversationIdRef.current = null;
+    setConversationId(null);
+    setError(null);
+    setStatus("idle");
+  }
+
+  useEffect(() => {
+    void loadConversations();
+  }, []);
+
   return {
     messages,
     status,
@@ -108,5 +169,9 @@ export function useChat() {
     conversationId,
     sendMessage,
     stopGeneration,
+    conversations,
+    loadingHistory,
+    selectConversation,
+    newConversation,
   };
 }

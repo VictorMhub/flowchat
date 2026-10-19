@@ -13,7 +13,7 @@ type ChatSidebarProps = {
   onNewChat: () => void;
 };
 
-export function ChatSideBat({
+export function ChatSidebar({
   conversations,
   activeId,
   loading,
