@@ -2,7 +2,7 @@ import { chatRequestSchema } from "@/features/chat/schemas/message.schema";
 import { generateChatStream } from "@/server/ai/aiGateway";
 import { chatRateLimit } from "@/server/security/rateLimit";
 import { getCurrentUser } from "@/server/auth/getCurrentUser";
-
+import { prisma } from "@/server/db/prisma";
 import { auth } from "@/auth";
 
 export async function POST(request: Request) {
@@ -62,7 +62,7 @@ export async function POST(request: Request) {
       return Response.json({ error: "Mensagens inválidas." }, { status: 400 });
     }
 
-    const { messages } = parsed.data;
+    const { messages, conversationId } = parsed.data;
 
     if (messages.at(-1)?.role !== "user") {
       return Response.json(
@@ -71,12 +71,52 @@ export async function POST(request: Request) {
       );
     }
 
+    const lastMessage = messages.at(-1)!;
+
+    let conversation;
+
+    if (conversationId) {
+      // Reutiliza somente conversas pertencentes ao usuário.
+      conversation = await prisma.conversation.findFirst({
+        where: {
+          id: conversationId,
+          userId: user.id,
+        },
+      });
+
+      if (!conversation) {
+        return Response.json(
+          { error: "Conversa não encontrada." },
+          { status: 404 },
+        );
+      }
+    } else {
+      // Cria uma conversa quando ainda não existe ID.
+      conversation = await prisma.conversation.create({
+        data: {
+          userId: user.id,
+          title: lastMessage.content.slice(0, 60) || "Nova conversa",
+        },
+      });
+    }
+
+    // Salva a mensagem enviada pelo usuário.
+    await prisma.message.create({
+      data: {
+        conversationId: conversation.id,
+        role: "user",
+        content: lastMessage.content,
+      },
+    });
+
     const geminiStream = await generateChatStream(messages, request.signal);
 
     const encoder = new TextEncoder();
 
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
+        let assistantContent = "";
+
         try {
           for await (const chunk of geminiStream) {
             if (request.signal.aborted) break;
@@ -84,8 +124,19 @@ export async function POST(request: Request) {
             const text = chunk.text;
 
             if (text) {
+              assistantContent += text;
               controller.enqueue(encoder.encode(text));
             }
+          }
+
+          if (!request.signal.aborted && assistantContent.trim()) {
+            await prisma.message.create({
+              data: {
+                conversationId: conversation.id,
+                role: "assistant",
+                content: assistantContent,
+              },
+            });
           }
 
           controller.close();
@@ -94,6 +145,9 @@ export async function POST(request: Request) {
           controller.error(error);
         }
       },
+      cancel() {
+        // O encerramento antecipado não salva uma resposta parcial.
+      },
     });
 
     return new Response(stream, {
@@ -101,6 +155,7 @@ export async function POST(request: Request) {
         "Content-Type": "text/plain; charset=utf-8",
         "Cache-Control": "no-cache, no-transform",
         "X-Content-Type-Options": "nosniff",
+        "X-Conversation-Id": conversation.id,
       },
     });
   } catch (error) {

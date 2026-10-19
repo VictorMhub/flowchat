@@ -8,6 +8,7 @@ export const messageSchema = z.object({
 
 export const chatRequestSchema = z.object({
   messages: z.array(messageSchema).min(1).max(30),
+   conversationId: z.string().cuid().nullish(),
 });
 
 export type ChatRequest = z.infer<typeof chatRequestSchema>;
