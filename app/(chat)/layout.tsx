@@ -10,11 +10,11 @@ export default function ChatLayout({
   return (
     <Suspense fallback={<p>Verificando sessão...</p>}>
       <ProtectedChat>
-        <div className="flex min-h-dvh flex-col">
+        <div className="flex h-dvh flex-col overflow-hidden">
           <header className="flex justify-end border-b p-4">
             <AuthButton />
           </header>
-          <main className="min-h-0 flex-1">{children}</main>
+          <main className="min-h-0 flex-1 overflow-hidden">{children}</main>
         </div>
       </ProtectedChat>
     </Suspense>
