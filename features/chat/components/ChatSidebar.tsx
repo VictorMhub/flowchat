@@ -36,6 +36,7 @@ export function ChatSidebar({
   onRename,
 }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
   const [draft, setDraft] = useState("");
 
   function cancel() {
@@ -54,6 +55,12 @@ export function ChatSidebar({
       cancel();
     }
   }
+
+  const filteredConversations = conversations.filter((conversations) =>
+    conversations.title
+      .toLocaleLowerCase("pt-BR")
+      .includes(search.trim().toLocaleLowerCase("pt-BR")),
+  );
 
   return (
     <>
@@ -98,6 +105,17 @@ export function ChatSidebar({
 
         <h2 className="mb-3 text-sm font-semibold text-gray-900">Histórico</h2>
 
+        <div className="mb-3">
+          <input
+            type="search"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Buscar conversas..."
+            aria-label="Buscar conversas pelo título"
+            className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          />
+        </div>
+
         <nav
           aria-label="Histórico de conversas"
           className="min-h-0 flex-1 space-y-1 overflow-y-auto"
@@ -108,7 +126,15 @@ export function ChatSidebar({
             <p className="text-sm text-gray-500">Nenhuma conversa ainda.</p>
           )}
 
-          {conversations.map((conversation) => (
+          {!loading &&
+            conversations.length > 0 &&
+            filteredConversations.length === 0 && (
+              <p className="text-sm text-gray-500">
+                Nenhuma conversa encontrada.
+              </p>
+            )}
+
+          {filteredConversations.map((conversation) => (
             <div
               key={conversation.id}
               className={`flex items-center gap-1 rounded-lg ${
