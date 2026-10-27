@@ -58,3 +58,44 @@ export async function GET(_resquest:Request, {params}: RouteContext) {
 
 
 }
+
+export async function DELETE(
+  _request: Request,
+  { params }: RouteContext,
+) {
+  try{
+    const user = await getCurrentUser();
+
+    if (!user) {
+      return Response.json(
+        {error: "Não autorizado."},
+        { status: 401},
+      );
+    }
+
+    const { id } = await params;
+
+    const result = await prisma.conversation.deleteMany({
+      where: {
+        id,
+        userId: user.id,
+      },
+    });
+
+    if (result.count === 0) {
+      return Response.json(
+        { error: "Conversa não encontrada."},
+        { status: 404 },
+      );
+    }
+
+    return new Response(null, { status: 204 })
+  } catch (error) {
+  console.error("Erro ao excluir conversa:", error);
+
+  return Response.json(
+    { error: "Erro ao excluir conversa."},
+    { status: 500},
+  )
+} 
+}

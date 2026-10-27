@@ -14,10 +14,12 @@ export function ChatContainer() {
     conversationId,
     conversations,
     loadingHistory,
+    deletingId,
     sendMessage,
     stopGeneration,
     selectConversation,
     newConversation,
+    deleteConversation,
   } = useChat();
 
   return (
@@ -26,8 +28,10 @@ export function ChatContainer() {
         conversations={conversations}
         activeId={conversationId}
         loading={loadingHistory}
+        deletingId={deletingId}
         onSelect={selectConversation}
         onNewChat={newConversation}
+        onDelete={deleteConversation}
       />
 
       <div className="mx-auto flex min-h-0 min-w-0 max-w-3xl flex-1 flex-col p-4">

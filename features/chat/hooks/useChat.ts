@@ -17,6 +17,7 @@ export function useChat() {
     { id: string; title: string }[]
   >([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   function updateMessages(nextMessages: ChatMessage[]) {
     messagesRef.current = nextMessages;
@@ -158,6 +159,48 @@ export function useChat() {
     setStatus("idle");
   }
 
+  async function deleteConversation(id: string) {
+    if (controllerRef.current || deletingId !== null) return;
+
+    setDeletingId(id);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/conversations/${encodeURIComponent(id)}`,
+        {
+          method: "DELETE",
+        },
+      );
+      if (!response.ok) {
+        throw new Error("Não foi possível excluir a conversa.");
+      }
+
+      // Remove imediatamente a conversa da sidebar.
+
+      setConversations((previous) =>
+        previous.filter((conversation) => conversation.id !== id),
+      );
+
+      // Se a conversa excluída estiver aberta, limpa o chat.
+
+      if (conversationIdRef.current === id) {
+        updateMessages([]);
+        conversationIdRef.current = null;
+        setConversationId(null);
+        setStatus("idle");
+      }
+    } catch (error) {
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Erro inesperado ao ecluir conversa",
+      );
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   useEffect(() => {
     void loadConversations();
   }, []);
@@ -167,11 +210,13 @@ export function useChat() {
     status,
     error,
     conversationId,
-    sendMessage,
-    stopGeneration,
     conversations,
     loadingHistory,
+    deletingId,
+    sendMessage,
+    stopGeneration,
     selectConversation,
     newConversation,
+    deleteConversation,
   };
 }
