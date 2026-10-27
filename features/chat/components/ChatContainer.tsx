@@ -56,7 +56,10 @@ export function ChatContainer() {
         </header>
 
         <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col p-4">
-          <MessageList messages={messages} />
+          <MessageList
+            messages={messages}
+            isStreaming={status === "streaming"}
+          />
 
           {error && (
             <p role="alert" className="py-2 text-sm text-red-600">

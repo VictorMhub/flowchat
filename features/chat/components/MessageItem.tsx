@@ -12,7 +12,10 @@ interface MessageItemProps {
   isStreaming?: boolean;
 }
 
-export function MessageItem({ message, isStreaming = false }:  MessageItemProps) {
+export function MessageItem({
+  message,
+  isStreaming = false,
+}: MessageItemProps) {
   const [copied, setCopied] = useState(false);
   const isUser = message.role === "user";
 
@@ -28,12 +31,12 @@ export function MessageItem({ message, isStreaming = false }:  MessageItemProps)
 
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-      <div className="min-w-0 max-w-[85%]">
+      <div className="min-w-0 max-w-[95%] sm:max-w-[85%]">
         <div
-          className={`rounded-xl p-3 ${
+          className={`rounded-2xl px-4 py-3 text-sm leading-7 shadow-sm ${
             isUser
-              ? "bg-blue-600 text-white"
-              : "bg-gray-100 text-gray-900"
+              ? "rounded-br-md bg-blue-600 text-white"
+              : "rounded-bl-md bg-gray-100 text-gray-900"
           }`}
         >
           {isUser ? (
@@ -49,9 +52,9 @@ export function MessageItem({ message, isStreaming = false }:  MessageItemProps)
                     return <>{children}</>;
                   },
                   code({ className, children, ...props }) {
-                    const match = /language-([\\w+#-]+)/.exec(className || "");
+                    const match = /language-([\w+#-]+)/.exec(className || "");
                     const content = String(children);
-                    const isBlock = Boolean(match) || content.includes("\\n");
+                    const isBlock = Boolean(match) || content.includes("\n");
 
                     if (isBlock) {
                       return (
@@ -63,7 +66,7 @@ export function MessageItem({ message, isStreaming = false }:  MessageItemProps)
 
                     return (
                       <code
-                        className="rounded bg-gray-200 px-1 py-0.5 text-sm"
+                        className="rounded bg-gray-200 px-1 py-0.5 text-xs"
                         {...props}
                       >
                         {children}
@@ -76,14 +79,23 @@ export function MessageItem({ message, isStreaming = false }:  MessageItemProps)
               </ReactMarkdown>
             </div>
           ) : (
-            <span className="animate-pulse text-sm">
-              Gerando resposta...
+            <span role="status" className="flex items-center gap-2 text-gray-500">
+              <span className="flex gap-1" aria-hidden="true">
+                {[0, 1, 2].map((index) => (
+                  <span
+                    key={index}
+                    className="h-2 w-2 animate-bounce rounded-full bg-blue-500"
+                    style={{ animationDelay: `${index * 150}ms` }}
+                  />
+                ))}
+              </span>
+              Pensando...
             </span>
           )}
         </div>
 
         {!isUser && (
-          <div className="mt-2 flex items-center gap-3">
+          <div className="mt-2 flex items-center gap-3 px-1">
             {message.content && (
               <button
                 type="button"
@@ -95,7 +107,8 @@ export function MessageItem({ message, isStreaming = false }:  MessageItemProps)
                 {copied ? "Copiado" : "Copiar resposta"}
               </button>
             )}
-            {isStreaming && (
+
+            {isStreaming && message.content && (
               <span role="status" className="flex items-center gap-2 text-xs text-gray-500">
                 <span className="h-2 w-2 animate-pulse rounded-full bg-blue-500" />
                 Gerando...
