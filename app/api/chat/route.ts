@@ -137,11 +137,12 @@ export async function POST(request: Request) {
                 content: assistantContent,
               },
             });
+
+            await prisma.conversation.update({
+              where: { id: conversation.id },
+              data: { updatedAt: new Date() },
+            });
           }
-          await prisma.conversation.update({
-            where: { id: conversation.id },
-            data: { updatedAt: new Date() },
-          });
 
           controller.close();
         } catch (error) {

@@ -10,19 +10,21 @@ export function ChatContainer() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const {
-    messages,
-    status,
-    error,
-    conversationId,
-    conversations,
-    loadingHistory,
-    deletingId,
-    sendMessage,
-    stopGeneration,
-    selectConversation,
-    newConversation,
-    deleteConversation,
-  } = useChat();
+  messages,
+  status,
+  error,
+  conversationId,
+  conversations,
+  loadingHistory,
+  deletingId,
+  renamingId,
+  sendMessage,
+  stopGeneration,
+  selectConversation,
+  newConversation,
+  deleteConversation,
+  renameConversation,
+} = useChat();
 
   return (
     <section className="flex h-full min-h-0 overflow-hidden">
@@ -31,11 +33,13 @@ export function ChatContainer() {
         activeId={conversationId}
         loading={loadingHistory}
         deletingId={deletingId}
+        renamingId={renamingId}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         onSelect={selectConversation}
         onNewChat={newConversation}
         onDelete={deleteConversation}
+        onRename={renameConversation}
       />
 
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">

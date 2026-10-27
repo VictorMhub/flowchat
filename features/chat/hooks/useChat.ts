@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useEffect, use } from "react";
+import { useRef, useState, useEffect } from "react";
 import { streamChat } from "../services/chatClient";
 import type { ChatMessage, ChatStatus } from "../types/chat.types";
 
@@ -18,6 +18,8 @@ export function useChat() {
   >([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const historyVersionRef = useRef(0);
 
   function updateMessages(nextMessages: ChatMessage[]) {
     messagesRef.current = nextMessages;
@@ -106,19 +108,28 @@ export function useChat() {
   }
 
   async function loadConversations() {
+    const version = historyVersionRef.current;
+
     try {
       setLoadingHistory(true);
 
-      const response = await fetch("/api/conversations");
+      const response = await fetch("/api/conversations", {
+        cache: "no-store",
+      });
 
       if (!response.ok) {
         throw new Error("Erro ao carregar histórico.");
       }
 
       const data = await response.json();
-      setConversations(data);
+
+      if (version === historyVersionRef.current) {
+        setConversations(data);
+      }
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Erro inesperado.");
+      if (version === historyVersionRef.current) {
+        setError(error instanceof Error ? error.message : "Erro inesperado.");
+      }
     } finally {
       setLoadingHistory(false);
     }
@@ -177,7 +188,7 @@ export function useChat() {
       }
 
       // Remove imediatamente a conversa da sidebar.
-
+      historyVersionRef.current += 1;
       setConversations((previous) =>
         previous.filter((conversation) => conversation.id !== id),
       );
@@ -205,6 +216,63 @@ export function useChat() {
     void loadConversations();
   }, []);
 
+  async function renameConversation(
+    id: string,
+    title: string,
+  ): Promise<boolean> {
+    const cleanTitle = title.trim();
+
+    if (
+      !cleanTitle ||
+      cleanTitle.length > 100 ||
+      renamingId !== null ||
+      deletingId !== null ||
+      controllerRef.current
+    ) {
+      return false;
+    }
+
+    setRenamingId(id);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/conversations/${encodeURIComponent(id)}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            title: cleanTitle,
+          }),
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error("Não foi possível renomear a conversa.");
+      }
+
+      historyVersionRef.current += 1;
+
+      setConversations((previous) =>
+        previous.map((conversation) =>
+          conversation.id === id
+            ? { ...conversation, title: cleanTitle }
+            : conversation,
+        ),
+      );
+
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erro inesperado.");
+
+      return false;
+    } finally {
+      setRenamingId(null);
+    }
+  }
+
   return {
     messages,
     status,
@@ -218,5 +286,7 @@ export function useChat() {
     selectConversation,
     newConversation,
     deleteConversation,
+    renamingId,
+    renameConversation,
   };
 }

@@ -1,20 +1,25 @@
 "use client";
 
+import { useState } from "react";
+import { Pencil, Check, X } from "lucide-react";
+
 type Conversation = {
   id: string;
   title: string;
 };
 
-type ChatSidebarProps = {
+type Props = {
   conversations: Conversation[];
   activeId: string | null;
   loading: boolean;
   deletingId: string | null;
+  renamingId: string | null;
   isOpen: boolean;
   onClose: () => void;
   onSelect: (id: string) => void;
   onNewChat: () => void;
   onDelete: (id: string) => void;
+  onRename: (id: string, title: string) => Promise<boolean>;
 };
 
 export function ChatSidebar({
@@ -22,35 +27,36 @@ export function ChatSidebar({
   activeId,
   loading,
   deletingId,
+  renamingId,
   isOpen,
   onClose,
   onSelect,
   onNewChat,
   onDelete,
-}: ChatSidebarProps) {
-  function confirmDelete(id: string, title: string) {
-    const confirmed = window.confirm(
-      `Deseja excluir a conversa "${title}"? Essa ação não pode ser desfeita.`,
-    );
+  onRename,
+}: Props) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
 
-    if (confirmed) {
-      onDelete(id);
+  function cancel() {
+    setEditingId(null);
+    setDraft("");
+  }
+
+  async function save(id: string) {
+    const title = (draft ?? "").trim();
+
+    if (!title || renamingId !== null) return;
+
+    const success = await onRename(id, title);
+
+    if (success) {
+      cancel();
     }
-  }
-
-  function handleSelect(id: string) {
-    onSelect(id);
-    onClose();
-  }
-
-  function handleNewChat() {
-    onNewChat();
-    onClose();
   }
 
   return (
     <>
-      {/* Fundo escuro no celular */}
       {isOpen && (
         <button
           type="button"
@@ -62,33 +68,30 @@ export function ChatSidebar({
 
       <aside
         id="chat-sidebar"
-        className={`
-          fixed inset-y-0 left-0 z-50
-          flex w-72 flex-col
-          border-r bg-white p-4
-          transition-transform duration-200
-          md:static md:z-auto md:w-64
-          md:translate-x-0
-          ${isOpen ? "translate-x-0" : "-translate-x-full"}
-        `}
+        className={`fixed inset-y-0 left-0 z-50 flex w-72 flex-col border-r bg-white p-4 transition-transform duration-200 md:static md:z-auto md:w-64 md:translate-x-0 ${
+          isOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
       >
-        <div className="mb-6 flex items-center justify-between gap-2">
-          <span className="font-semibold text-gray-900">Flowchat</span>
+        <div className="mb-6 flex items-center justify-between">
+          <strong className="text-gray-900">Flowchat</strong>
 
           <button
             type="button"
-            aria-label="Fechar histórico"
             onClick={onClose}
-            className="rounded-lg p-2 text-gray-700 hover:bg-gray-100 md:hidden"
+            aria-label="Fechar histórico"
+            className="rounded p-2 text-gray-700 md:hidden"
           >
-            ✕
+            <X size={18} />
           </button>
         </div>
 
         <button
           type="button"
-          onClick={handleNewChat}
-          className="mb-6 rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700"
+          onClick={() => {
+            onNewChat();
+            onClose();
+          }}
+          className="mb-6 rounded-lg bg-blue-600 px-4 py-2 text-white"
         >
           + Nova conversa
         </button>
@@ -114,26 +117,102 @@ export function ChatSidebar({
                   : "text-gray-800 hover:bg-gray-100"
               }`}
             >
-              <button
-                type="button"
-                onClick={() => handleSelect(conversation.id)}
-                className="min-w-0 flex-1 truncate px-3 py-2 text-left text-sm"
-              >
-                {conversation.title}
-              </button>
+              {editingId === conversation.id ? (
+                <form
+                  className="flex min-w-0 flex-1 items-center gap-1 p-1"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void save(conversation.id);
+                  }}
+                >
+                  <input
+                    autoFocus
+                    aria-label="Novo título da conversa"
+                    maxLength={100}
+                    value={draft ?? ""}
+                    onChange={(event) => setDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") cancel();
+                    }}
+                    disabled={renamingId === conversation.id}
+                    className="min-w-0 flex-1 rounded border bg-white px-2 py-1 text-sm text-gray-900"
+                  />
 
-              <button
-                type="button"
-                aria-label={`Excluir ${conversation.title}`}
-                title="Excluir conversa"
-                disabled={deletingId !== null}
-                onClick={() =>
-                  confirmDelete(conversation.id, conversation.title)
-                }
-                className="shrink-0 rounded p-2 text-red-600 hover:bg-red-100 disabled:opacity-50"
-              >
-                {deletingId === conversation.id ? "..." : "×"}
-              </button>
+                  <button
+                    type="submit"
+                    aria-label="Salvar título"
+                    disabled={!(draft ?? "").trim() || renamingId !== null}
+                    className="rounded p-1 disabled:opacity-50"
+                  >
+                    <Check size={16} />
+                  </button>
+
+                  <button
+                    type="button"
+                    aria-label="Cancelar edição"
+                    onClick={cancel}
+                    disabled={renamingId === conversation.id}
+                    className="rounded p-1 disabled:opacity-50"
+                  >
+                    <X size={16} />
+                  </button>
+                </form>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    title={conversation.title}
+                    onClick={() => {
+                      onSelect(conversation.id);
+                      onClose();
+                    }}
+                    className="min-w-0 flex-1 truncate px-3 py-2 text-left text-sm"
+                  >
+                    {conversation.title}
+                  </button>
+
+                  <button
+                    type="button"
+                    title="Renomear conversa"
+                    aria-label={`Renomear ${conversation.title}`}
+                    disabled={
+                      deletingId !== null ||
+                      renamingId !== null ||
+                      editingId !== null
+                    }
+                    onClick={() => {
+                      setEditingId(conversation.id);
+                      setDraft(conversation.title ?? "");
+                    }}
+                    className="shrink-0 rounded p-2 hover:bg-blue-200 disabled:opacity-50"
+                  >
+                    <Pencil size={15} />
+                  </button>
+
+                  <button
+                    type="button"
+                    title="Excluir conversa"
+                    aria-label={`Excluir ${conversation.title}`}
+                    disabled={
+                      deletingId !== null ||
+                      renamingId !== null ||
+                      editingId !== null
+                    }
+                    onClick={() => {
+                      const confirmed = window.confirm(
+                        `Excluir "${conversation.title}"? Essa ação não pode ser desfeita.`,
+                      );
+
+                      if (confirmed) {
+                        onDelete(conversation.id);
+                      }
+                    }}
+                    className="shrink-0 rounded p-2 text-red-600 hover:bg-red-100 disabled:opacity-50"
+                  >
+                    {deletingId === conversation.id ? "..." : <X size={16} />}
+                  </button>
+                </>
+              )}
             </div>
           ))}
         </nav>

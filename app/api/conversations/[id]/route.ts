@@ -99,3 +99,69 @@ export async function DELETE(
   )
 } 
 }
+
+export async function PATCH(
+  request: Request,
+  { params }: RouteContext,
+) {
+  try {
+    const user = await getCurrentUser()
+
+    if (!user) {
+       return Response.json(
+          { error: "Não autorizado." },
+          { status: 401 },
+       );
+    }
+
+    const { id } = await params;
+    const body: unknown = await request.json();
+
+    if (
+      typeof body !== "object" ||
+      body === null ||
+      !("title" in body) ||
+      typeof body.title !== "string"
+    ) {
+      return Response.json(
+        { error: "Título inválido." },
+        { status: 400 },
+      );
+    }
+
+    const title = body.title.trim();
+
+    if (title.length < 1 || title.length > 100) {
+      return Response.json(
+        { error: "O título deve ter entre 1 e 100 caracteres."},
+        { status: 400 },
+      );
+    }
+
+    const result = await prisma.conversation.updateMany({
+      where: {
+         id,
+         userId: user.id,
+      },
+      data: {
+        title,
+      },
+    });
+
+    if (result.count === 0) {
+       return Response.json(
+        { error: "Conversa não encontrada."},
+        { status: 404 },
+       );
+    }
+    
+    return Response.json({ success: true });
+  } catch (error) {
+    console.error("Erro ao renomear conversa:", error);
+
+    return Response.json(
+      { error: "Erro ao renomear conversa." },
+      { status: 500 },
+    );
+  }
+}
