@@ -29,6 +29,7 @@ model Conversation {
   @@index([userId, updatedAt])
 }
 
+
 model Message {
   id             String       @id @default(cuid())
   role           String
@@ -36,6 +37,9 @@ model Message {
   conversationId String
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   createdAt      DateTime     @default(now())
+  position       Int?
 
   @@index([conversationId, createdAt])
+  @@unique([conversationId, position])
 }
+

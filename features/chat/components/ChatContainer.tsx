@@ -24,6 +24,8 @@ export function ChatContainer() {
   newConversation,
   deleteConversation,
   renameConversation,
+  editingMessageId,
+  editMessage,
 } = useChat();
 
   return (
@@ -63,6 +65,8 @@ export function ChatContainer() {
           <MessageList
             messages={messages}
             isStreaming={status === "streaming"}
+            editingMessageId={editingMessageId}
+            onEditMessage={editMessage}
           />
 
           {error && (

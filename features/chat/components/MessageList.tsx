@@ -7,11 +7,18 @@ import type { ChatMessage } from "../types/chat.types";
 type Props = {
   messages: ChatMessage[];
   isStreaming?: boolean;
+  editingMessageId?: string | null;
+  onEditMessage?: (messageId: string, content: string) => Promise<boolean>;
 };
 
 const BOTTOM_THRESHOLD = 120;
 
-export function MessageList({ messages }: Props, isStreaming = false) {
+export function MessageList({
+  messages,
+  isStreaming = false,
+  editingMessageId = null,
+  onEditMessage,
+}: Props) {
   const containerRef = useRef<HTMLElement>(null);
   const shouldAutoScrollRef = useRef(true);
 
@@ -84,6 +91,9 @@ export function MessageList({ messages }: Props, isStreaming = false) {
                 index === messages.length - 1 &&
                 message.role === "assistant"
               }
+              editingMessageId={editingMessageId}
+              onEdit={onEditMessage}
+              disabled={isStreaming || editingMessageId !== null}
             />
           ))}
         </div>

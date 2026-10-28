@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState, useEffect } from "react";
-import { streamChat } from "../services/chatClient";
+import { editChatMessage, streamChat } from "../services/chatClient";
 import type { ChatMessage, ChatStatus } from "../types/chat.types";
 
 export function useChat() {
@@ -20,88 +20,121 @@ export function useChat() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const historyVersionRef = useRef(0);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
 
   function updateMessages(nextMessages: ChatMessage[]) {
     messagesRef.current = nextMessages;
     setMessages(nextMessages);
   }
 
-  async function sendMessage(content: string) {
-    if (!content.trim() || controllerRef.current) return;
+  
+async function sendMessage(content: string) {
+  const cleanContent = content.trim();
 
-    const controller = new AbortController();
-    controllerRef.current = controller;
+  if (!cleanContent || controllerRef.current) return;
 
-    const userMessage: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: content.trim(),
-    };
+  const controller = new AbortController();
+  controllerRef.current = controller;
 
-    const assistantMessage: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      content: "",
-    };
+  const currentConversationId = conversationIdRef.current;
 
-    // Não envia mensagens vazias ao backend.
-    const previousMessages = messagesRef.current.filter(
-      (message) => message.content.trim().length > 0,
+  const userMessage: ChatMessage = {
+    id: crypto.randomUUID(),
+    role: "user",
+    content: cleanContent,
+  };
+
+  const assistantMessage: ChatMessage = {
+    id: crypto.randomUUID(),
+    role: "assistant",
+    content: "",
+  };
+
+  const previousMessages = messagesRef.current.filter(
+    (message) => message.content.trim().length > 0,
+  );
+
+  const history = [...previousMessages, userMessage];
+
+  updateMessages([...history, assistantMessage]);
+  setStatus("streaming");
+  setError(null);
+
+  try {
+    const response = await streamChat(
+      history,
+      controller.signal,
+      (chunk) => {
+        if (controller.signal.aborted) return;
+
+        updateMessages(
+          messagesRef.current.map((message) =>
+            message.id === assistantMessage.id
+              ? {
+                  ...message,
+                  content: message.content + chunk,
+                }
+              : message,
+          ),
+        );
+      },
+      currentConversationId,
     );
 
-    const history = [...previousMessages, userMessage];
+    const savedConversationId =
+      response.headers.get("X-Conversation-Id");
 
-    updateMessages([...history, assistantMessage]);
-    setStatus("streaming");
-    setError(null);
-
-    try {
-      const response = await streamChat(
-        history,
-        controller.signal,
-        (chunk) => {
-          updateMessages(
-            messagesRef.current.map((message) =>
-              message.id === assistantMessage.id
-                ? {
-                    ...message,
-                    content: message.content + chunk,
-                  }
-                : message,
-            ),
-          );
-        },
-        conversationIdRef.current,
+    if (!savedConversationId) {
+      throw new Error(
+        "A API não retornou o ID da conversa.",
       );
-
-      const id = response.headers.get("X-Conversation-Id");
-
-      if (id) {
-        conversationIdRef.current = id;
-        setConversationId(id);
-
-        void loadConversations();
-      }
-
-      setStatus("idle");
-    } catch (err) {
-      // Remove a resposta vazia ou incompleta após falha.
-      updateMessages(
-        messagesRef.current.filter(
-          (message) => message.id !== assistantMessage.id,
-        ),
-      );
-
-      if (controller.signal.aborted) {
-        setStatus("idle");
-      } else {
-        setError(err instanceof Error ? err.message : "Erro inesperado.");
-        setStatus("error");
-      }
-    } finally {
-      controllerRef.current = null;
     }
+
+    conversationIdRef.current = savedConversationId;
+    setConversationId(savedConversationId);
+
+    // Busca as mensagens com IDs definitivos do banco.
+    const historyResponse = await fetch(
+      `/api/conversations/${encodeURIComponent(savedConversationId)}`,
+      {
+        cache: "no-store",
+      },
+    );
+
+    if (!historyResponse.ok) {
+      throw new Error(
+        "A resposta foi gerada, mas não foi possível sincronizar o histórico.",
+      );
+    }
+
+    const savedConversation = (await historyResponse.json()) as {
+      id: string;
+      messages: ChatMessage[];
+    };
+
+    // Substitui o estado, sem concatenar mensagens novamente.
+    updateMessages(savedConversation.messages);
+
+    setStatus("idle");
+    void loadConversations();
+  } catch (err) {
+    if (controller.signal.aborted) {
+      setStatus("idle");
+      return;
+    }
+
+    // Mantém as mensagens visíveis se a sincronização falhar.
+    setError(
+      err instanceof Error
+        ? err.message
+        : "Erro inesperado.",
+    );
+    setStatus("error");
+  } finally {
+    controllerRef.current = null;
   }
+}
+
 
   function stopGeneration() {
     controllerRef.current?.abort();
@@ -273,6 +306,140 @@ export function useChat() {
     }
   }
 
+  
+
+async function editMessage(
+  messageId: string,
+  content: string,
+): Promise<boolean> {
+  const cleanContent = content.trim();
+  const currentConversationId = conversationIdRef.current;
+
+  if (
+    !currentConversationId ||
+    !cleanContent ||
+    cleanContent.length > 10000 ||
+    controllerRef.current ||
+    editingMessageId !== null
+  ) {
+    return false;
+  }
+
+  const currentMessages = messagesRef.current;
+  const messageIndex = currentMessages.findIndex(
+    (message) => message.id === messageId,
+  );
+
+  if (
+    messageIndex === -1 ||
+    currentMessages[messageIndex].role !== "user"
+  ) {
+    return false;
+  }
+
+  const previousMessages = currentMessages.slice();
+  const controller = new AbortController();
+
+  const assistantId = crypto.randomUUID();
+
+  const editedMessage: ChatMessage = {
+    ...currentMessages[messageIndex],
+    content: cleanContent,
+  };
+
+  const assistantMessage: ChatMessage = {
+    id: assistantId,
+    role: "assistant",
+    content: "",
+  };
+
+  controllerRef.current = controller;
+  setEditingMessageId(messageId);
+  setStatus("streaming");
+  setError(null);
+
+  // Atualização otimista: a edição aparece imediatamente.
+  updateMessages([
+    ...currentMessages.slice(0, messageIndex),
+    editedMessage,
+    assistantMessage,
+  ]);
+
+  try {
+    const result = await editChatMessage(
+      currentConversationId,
+      messageId,
+      cleanContent,
+      controller.signal,
+      (chunk) => {
+        if (
+          controller.signal.aborted ||
+          conversationIdRef.current !== currentConversationId
+        ) {
+          return;
+        }
+
+        updateMessages(
+          messagesRef.current.map((message) =>
+            message.id === assistantId
+              ? {
+                  ...message,
+                  content: message.content + chunk,
+                }
+              : message,
+          ),
+        );
+      },
+    );
+
+    if (conversationIdRef.current !== currentConversationId) {
+      return false;
+    }
+
+    // Substitui o ID temporário pelo ID salvo no banco.
+    updateMessages(
+      messagesRef.current.map((message) =>
+        message.id === assistantId
+          ? {
+              id: result.assistant.id,
+              role: "assistant",
+              content: result.assistant.content,
+            }
+          : message,
+      ),
+    );
+
+    setStatus("idle");
+    void loadConversations();
+
+    return true;
+  } catch (err) {
+    // Se a geração ou o salvamento falhar,
+    // restaura o histórico anterior.
+    if (conversationIdRef.current === currentConversationId) {
+      updateMessages(previousMessages);
+    }
+
+    if (controller.signal.aborted) {
+      setStatus("idle");
+    } else {
+      setStatus("error");
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Não foi possível editar a mensagem.",
+      );
+    }
+
+    return false;
+  } finally {
+    controllerRef.current = null;
+    setEditingMessageId(null);
+  }
+}
+
+
+
   return {
     messages,
     status,
@@ -288,5 +455,7 @@ export function useChat() {
     deleteConversation,
     renamingId,
     renameConversation,
+    editingMessageId,
+    editMessage,
   };
 }

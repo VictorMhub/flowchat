@@ -12,3 +12,7 @@ export const chatRequestSchema = z.object({
 });
 
 export type ChatRequest = z.infer<typeof chatRequestSchema>;
+
+export const editMessageSchema = z.object({
+  content: z.string().trim().min(1).max(10000)
+});

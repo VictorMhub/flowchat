@@ -1,46 +1,68 @@
+import { auth } from "@/auth";
 import { chatRequestSchema } from "@/features/chat/schemas/message.schema";
 import { generateChatStream } from "@/server/ai/aiGateway";
-import { chatRateLimit } from "@/server/security/rateLimit";
 import { getCurrentUser } from "@/server/auth/getCurrentUser";
 import { prisma } from "@/server/db/prisma";
-import { auth } from "@/auth";
+import {
+  acquireConversationLock,
+  releaseConversationLock,
+  renewConversationLock,
+} from "@/server/security/conversationLock";
+import { chatRateLimit } from "@/server/security/rateLimit";
+
+const LOCK_RENEW_INTERVAL_MS = 30_000;
 
 export async function POST(request: Request) {
+  let lockedConversationId: string | null = null;
+  let lockToken: string | null = null;
+  let lockTransferredToStream = false;
+
+  async function releaseLock() {
+    if (!lockedConversationId || !lockToken) return;
+
+    try {
+      await releaseConversationLock(lockedConversationId, lockToken);
+    } catch (error) {
+      console.error("Erro ao liberar bloqueio:", error);
+    }
+  }
+
   try {
     const forwardedFor = request.headers.get("x-forwarded-for");
     const ip = forwardedFor?.split(",")[0]?.trim();
 
     if (!ip) {
       return Response.json(
-        { erro: "Não foi possível identificar a origem." },
+        { error: "Não foi possível identificar a origem." },
         { status: 403 },
       );
     }
+
     const session = await auth();
+
     if (!session?.user?.email) {
       return Response.json(
-        { error: "Usuário naõ autenticado." },
+        { error: "Usuário não autenticado." },
         { status: 401 },
       );
     }
+
     const user = await getCurrentUser();
 
     if (!user) {
       return Response.json({ error: "Não autorizado." }, { status: 401 });
     }
 
-    const identifier = `user:${user.id}`;
+    const limit = await chatRateLimit.limit(`user:${user.id}`);
 
-    const result = await chatRateLimit.limit(identifier);
-
-    if (!result.success) {
+    if (!limit.success) {
       return Response.json(
-        { error: "Limite de mensagens atingido. Tente novamente mais tarde." },
+        { error: "Limite de mensagens atingido." },
         {
           status: 429,
           headers: {
             "Retry-After": String(
-              Math.max(1, Math.ceil((result.reset - Date.now()) / 1000)),
+              Math.max(1, Math.ceil((limit.reset - Date.now()) / 1000)),
             ),
           },
         },
@@ -55,7 +77,15 @@ export async function POST(request: Request) {
         { status: 413 },
       );
     }
-    const body: unknown = await request.json();
+
+    let body: unknown;
+
+    try {
+      body = await request.json();
+    } catch {
+      return Response.json({ error: "JSON inválido." }, { status: 400 });
+    }
+
     const parsed = chatRequestSchema.safeParse(body);
 
     if (!parsed.success) {
@@ -63,25 +93,24 @@ export async function POST(request: Request) {
     }
 
     const { messages, conversationId } = parsed.data;
+    const lastMessage = messages.at(-1);
 
-    if (messages.at(-1)?.role !== "user") {
+    if (!lastMessage || lastMessage.role !== "user") {
       return Response.json(
         { error: "A última mensagem deve ser do usuário." },
         { status: 400 },
       );
     }
 
-    const lastMessage = messages.at(-1)!;
-
     let conversation;
 
     if (conversationId) {
-      // Reutiliza somente conversas pertencentes ao usuário.
       conversation = await prisma.conversation.findFirst({
         where: {
           id: conversationId,
           userId: user.id,
         },
+        select: { id: true },
       });
 
       if (!conversation) {
@@ -91,35 +120,121 @@ export async function POST(request: Request) {
         );
       }
     } else {
-      // Cria uma conversa quando ainda não existe ID.
       conversation = await prisma.conversation.create({
         data: {
           userId: user.id,
           title: lastMessage.content.slice(0, 60) || "Nova conversa",
         },
+        select: { id: true },
       });
     }
 
-    // Salva a mensagem enviada pelo usuário.
-    await prisma.message.create({
-      data: {
-        conversationId: conversation.id,
-        role: "user",
-        content: lastMessage.content,
-      },
+    const currentConversationId = conversation.id;
+
+    lockedConversationId = currentConversationId;
+    lockToken = await acquireConversationLock(currentConversationId);
+
+    if (!lockToken) {
+      return Response.json(
+        {
+          error: "Esta conversa já possui uma operação em andamento. Aguarde.",
+        },
+        { status: 409 },
+      );
+    }
+
+    const currentLockToken = lockToken;
+
+    await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`
+        SELECT id
+        FROM "Conversation"
+        WHERE id = ${currentConversationId}
+        FOR UPDATE
+      `;
+
+      const lastSavedMessage = await tx.message.findFirst({
+        where: {
+          conversationId: currentConversationId,
+          position: { not: null },
+        },
+        orderBy: [{ position: "desc" }, { createdAt: "desc" }, { id: "desc" }],
+        select: { position: true },
+      });
+
+      const nextPosition = (lastSavedMessage?.position ?? -1) + 1;
+
+      await tx.message.create({
+        data: {
+          conversationId: currentConversationId,
+          role: "user",
+          content: lastMessage.content,
+          position: nextPosition,
+        },
+      });
     });
 
-    const geminiStream = await generateChatStream(messages, request.signal);
+    // Este sinal controla especificamente a geração do Gemini.
+    const generationController = new AbortController();
+
+    const abortGeneration = () => {
+      generationController.abort();
+    };
+
+    if (request.signal.aborted) {
+      abortGeneration();
+    } else {
+      request.signal.addEventListener("abort", abortGeneration, { once: true });
+    }
+
+    let geminiStream;
+
+    try {
+      geminiStream = await generateChatStream(
+        messages,
+        generationController.signal,
+      );
+    } catch (error) {
+      request.signal.removeEventListener("abort", abortGeneration);
+      throw error;
+    }
 
     const encoder = new TextEncoder();
 
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         let assistantContent = "";
+        let lockLost = false;
+        let finished = false;
+        let renewing = false;
+
+        const renewalInterval = setInterval(() => {
+          if (finished || renewing) return;
+
+          renewing = true;
+
+          void renewConversationLock(currentConversationId, currentLockToken)
+            .then((renewed) => {
+              if (!renewed) {
+                lockLost = true;
+                abortGeneration();
+              }
+            })
+            .catch((error) => {
+              lockLost = true;
+              abortGeneration();
+              console.error("Erro ao renovar bloqueio:", error);
+            })
+            .finally(() => {
+              renewing = false;
+            });
+        }, LOCK_RENEW_INTERVAL_MS);
 
         try {
           for await (const chunk of geminiStream) {
-            if (request.signal.aborted) break;
+            if (generationController.signal.aborted || lockLost) {
+              break;
+            }
 
             const text = chunk.text;
 
@@ -129,38 +244,97 @@ export async function POST(request: Request) {
             }
           }
 
-          if (!request.signal.aborted && assistantContent.trim()) {
-            await prisma.message.create({
-              data: {
-                conversationId: conversation.id,
-                role: "assistant",
-                content: assistantContent,
-              },
-            });
+          if (lockLost) {
+            throw new Error("LOCK_LOST");
+          }
 
-            await prisma.conversation.update({
-              where: { id: conversation.id },
-              data: { updatedAt: new Date() },
+          if (!generationController.signal.aborted && assistantContent.trim()) {
+            const lockStillValid = await renewConversationLock(
+              currentConversationId,
+              currentLockToken,
+            );
+
+            if (!lockStillValid) {
+              throw new Error("LOCK_LOST");
+            }
+
+            await prisma.$transaction(async (tx) => {
+              await tx.$queryRaw`
+                SELECT id
+                FROM "Conversation"
+                WHERE id = ${currentConversationId}
+                FOR UPDATE
+              `;
+
+              const lastSavedMessage = await tx.message.findFirst({
+                where: {
+                  conversationId: currentConversationId,
+                  position: { not: null },
+                },
+                orderBy: [
+                  { position: "desc" },
+                  { createdAt: "desc" },
+                  { id: "desc" },
+                ],
+                select: { position: true },
+              });
+
+              const assistantPosition = (lastSavedMessage?.position ?? -1) + 1;
+
+              await tx.message.create({
+                data: {
+                  conversationId: currentConversationId,
+                  role: "assistant",
+                  content: assistantContent,
+                  position: assistantPosition,
+                },
+              });
+
+              await tx.conversation.update({
+                where: { id: currentConversationId },
+                data: { updatedAt: new Date() },
+              });
             });
           }
 
-          controller.close();
+          if (!generationController.signal.aborted) {
+            controller.close();
+          }
         } catch (error) {
-          console.error("Erro no streaming:", error);
-          controller.error(error);
+          if (!generationController.signal.aborted) {
+            console.error("Erro no streaming:", error);
+
+            try {
+              controller.error(error);
+            } catch {
+              // A leitura pode já ter sido cancelada.
+            }
+          }
+        } finally {
+          finished = true;
+          clearInterval(renewalInterval);
+
+          request.signal.removeEventListener("abort", abortGeneration);
+
+          await releaseLock();
         }
       },
+
       cancel() {
-        // O encerramento antecipado não salva uma resposta parcial.
+        // Não libera o bloqueio aqui.
+        // O finally da geração fará isso.
+        abortGeneration();
       },
     });
+
+    lockTransferredToStream = true;
 
     return new Response(stream, {
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
         "Cache-Control": "no-cache, no-transform",
         "X-Content-Type-Options": "nosniff",
-        "X-Conversation-Id": conversation.id,
+        "X-Conversation-Id": currentConversationId,
       },
     });
   } catch (error) {
@@ -170,5 +344,9 @@ export async function POST(request: Request) {
       { error: "Não foi possível gerar a resposta." },
       { status: 500 },
     );
+  } finally {
+    if (!lockTransferredToStream) {
+      await releaseLock();
+    }
   }
 }
