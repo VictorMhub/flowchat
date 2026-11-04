@@ -1,3 +1,4 @@
+
 import { auth } from "@/auth";
 import { chatRequestSchema } from "@/features/chat/schemas/message.schema";
 import { generateChatStream } from "@/server/ai/aiGateway";
@@ -21,7 +22,10 @@ export async function POST(request: Request) {
     if (!lockedConversationId || !lockToken) return;
 
     try {
-      await releaseConversationLock(lockedConversationId, lockToken);
+      await releaseConversationLock(
+        lockedConversationId,
+        lockToken,
+      );
     } catch (error) {
       console.error("Erro ao liberar bloqueio:", error);
     }
@@ -50,7 +54,10 @@ export async function POST(request: Request) {
     const user = await getCurrentUser();
 
     if (!user) {
-      return Response.json({ error: "Não autorizado." }, { status: 401 });
+      return Response.json(
+        { error: "Não autorizado." },
+        { status: 401 },
+      );
     }
 
     const limit = await chatRateLimit.limit(`user:${user.id}`);
@@ -62,14 +69,19 @@ export async function POST(request: Request) {
           status: 429,
           headers: {
             "Retry-After": String(
-              Math.max(1, Math.ceil((limit.reset - Date.now()) / 1000)),
+              Math.max(
+                1,
+                Math.ceil((limit.reset - Date.now()) / 1000),
+              ),
             ),
           },
         },
       );
     }
 
-    const contentLength = Number(request.headers.get("content-length") ?? 0);
+    const contentLength = Number(
+      request.headers.get("content-length") ?? 0,
+    );
 
     if (contentLength > 100_000) {
       return Response.json(
@@ -83,13 +95,19 @@ export async function POST(request: Request) {
     try {
       body = await request.json();
     } catch {
-      return Response.json({ error: "JSON inválido." }, { status: 400 });
+      return Response.json(
+        { error: "JSON inválido." },
+        { status: 400 },
+      );
     }
 
     const parsed = chatRequestSchema.safeParse(body);
 
     if (!parsed.success) {
-      return Response.json({ error: "Mensagens inválidas." }, { status: 400 });
+      return Response.json(
+        { error: "Mensagens inválidas." },
+        { status: 400 },
+      );
     }
 
     const { messages, conversationId } = parsed.data;
@@ -123,7 +141,9 @@ export async function POST(request: Request) {
       conversation = await prisma.conversation.create({
         data: {
           userId: user.id,
-          title: lastMessage.content.slice(0, 60) || "Nova conversa",
+          title:
+            lastMessage.content.slice(0, 60) ||
+            "Nova conversa",
         },
         select: { id: true },
       });
@@ -132,12 +152,16 @@ export async function POST(request: Request) {
     const currentConversationId = conversation.id;
 
     lockedConversationId = currentConversationId;
-    lockToken = await acquireConversationLock(currentConversationId);
+
+    lockToken = await acquireConversationLock(
+      currentConversationId,
+    );
 
     if (!lockToken) {
       return Response.json(
         {
-          error: "Esta conversa já possui uma operação em andamento. Aguarde.",
+          error:
+            "Esta conversa já possui uma operação em andamento. Aguarde.",
         },
         { status: 409 },
       );
@@ -145,36 +169,64 @@ export async function POST(request: Request) {
 
     const currentLockToken = lockToken;
 
-    await prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`
-        SELECT id
-        FROM "Conversation"
-        WHERE id = ${currentConversationId}
-        FOR UPDATE
-      `;
+    // Incrementa a versão e salva a mensagem do usuário
+    // na mesma transação.
+    const generationVersion = await prisma.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`
+          SELECT id
+          FROM "Conversation"
+          WHERE id = ${currentConversationId}
+          FOR UPDATE
+        `;
 
-      const lastSavedMessage = await tx.message.findFirst({
-        where: {
-          conversationId: currentConversationId,
-          position: { not: null },
-        },
-        orderBy: [{ position: "desc" }, { createdAt: "desc" }, { id: "desc" }],
-        select: { position: true },
-      });
+        const updatedConversation =
+          await tx.conversation.update({
+            where: {
+              id: currentConversationId,
+            },
+            data: {
+              generationVersion: {
+                increment: 1,
+              },
+            },
+            select: {
+              generationVersion: true,
+            },
+          });
 
-      const nextPosition = (lastSavedMessage?.position ?? -1) + 1;
+        const lastSavedMessage =
+          await tx.message.findFirst({
+            where: {
+              conversationId: currentConversationId,
+              position: { not: null },
+            },
+            orderBy: [
+              { position: "desc" },
+              { createdAt: "desc" },
+              { id: "desc" },
+            ],
+            select: {
+              position: true,
+            },
+          });
 
-      await tx.message.create({
-        data: {
-          conversationId: currentConversationId,
-          role: "user",
-          content: lastMessage.content,
-          position: nextPosition,
-        },
-      });
-    });
+        const nextPosition =
+          (lastSavedMessage?.position ?? -1) + 1;
 
-    // Este sinal controla especificamente a geração do Gemini.
+        await tx.message.create({
+          data: {
+            conversationId: currentConversationId,
+            role: "user",
+            content: lastMessage.content,
+            position: nextPosition,
+          },
+        });
+
+        return updatedConversation.generationVersion;
+      },
+    );
+
     const generationController = new AbortController();
 
     const abortGeneration = () => {
@@ -184,7 +236,11 @@ export async function POST(request: Request) {
     if (request.signal.aborted) {
       abortGeneration();
     } else {
-      request.signal.addEventListener("abort", abortGeneration, { once: true });
+      request.signal.addEventListener(
+        "abort",
+        abortGeneration,
+        { once: true },
+      );
     }
 
     let geminiStream;
@@ -195,7 +251,11 @@ export async function POST(request: Request) {
         generationController.signal,
       );
     } catch (error) {
-      request.signal.removeEventListener("abort", abortGeneration);
+      request.signal.removeEventListener(
+        "abort",
+        abortGeneration,
+      );
+
       throw error;
     }
 
@@ -213,7 +273,10 @@ export async function POST(request: Request) {
 
           renewing = true;
 
-          void renewConversationLock(currentConversationId, currentLockToken)
+          void renewConversationLock(
+            currentConversationId,
+            currentLockToken,
+          )
             .then((renewed) => {
               if (!renewed) {
                 lockLost = true;
@@ -223,7 +286,11 @@ export async function POST(request: Request) {
             .catch((error) => {
               lockLost = true;
               abortGeneration();
-              console.error("Erro ao renovar bloqueio:", error);
+
+              console.error(
+                "Erro ao renovar bloqueio:",
+                error,
+              );
             })
             .finally(() => {
               renewing = false;
@@ -232,7 +299,10 @@ export async function POST(request: Request) {
 
         try {
           for await (const chunk of geminiStream) {
-            if (generationController.signal.aborted || lockLost) {
+            if (
+              generationController.signal.aborted ||
+              lockLost
+            ) {
               break;
             }
 
@@ -248,17 +318,22 @@ export async function POST(request: Request) {
             throw new Error("LOCK_LOST");
           }
 
-          if (!generationController.signal.aborted && assistantContent.trim()) {
-            const lockStillValid = await renewConversationLock(
-              currentConversationId,
-              currentLockToken,
-            );
+          if (
+            !generationController.signal.aborted &&
+            assistantContent.trim()
+          ) {
+            const lockStillValid =
+              await renewConversationLock(
+                currentConversationId,
+                currentLockToken,
+              );
 
             if (!lockStillValid) {
               throw new Error("LOCK_LOST");
             }
 
             await prisma.$transaction(async (tx) => {
+              // Serializa gravações da mesma conversa.
               await tx.$queryRaw`
                 SELECT id
                 FROM "Conversation"
@@ -266,20 +341,43 @@ export async function POST(request: Request) {
                 FOR UPDATE
               `;
 
-              const lastSavedMessage = await tx.message.findFirst({
-                where: {
-                  conversationId: currentConversationId,
-                  position: { not: null },
-                },
-                orderBy: [
-                  { position: "desc" },
-                  { createdAt: "desc" },
-                  { id: "desc" },
-                ],
-                select: { position: true },
-              });
+              const currentConversation =
+                await tx.conversation.findUnique({
+                  where: {
+                    id: currentConversationId,
+                  },
+                  select: {
+                    generationVersion: true,
+                  },
+                });
 
-              const assistantPosition = (lastSavedMessage?.position ?? -1) + 1;
+              // Uma geração mais recente assumiu a conversa.
+              if (
+                !currentConversation ||
+                currentConversation.generationVersion !==
+                  generationVersion
+              ) {
+                throw new Error("GENERATION_SUPERSEDED");
+              }
+
+              const lastSavedMessage =
+                await tx.message.findFirst({
+                  where: {
+                    conversationId: currentConversationId,
+                    position: { not: null },
+                  },
+                  orderBy: [
+                    { position: "desc" },
+                    { createdAt: "desc" },
+                    { id: "desc" },
+                  ],
+                  select: {
+                    position: true,
+                  },
+                });
+
+              const assistantPosition =
+                (lastSavedMessage?.position ?? -1) + 1;
 
               await tx.message.create({
                 data: {
@@ -291,8 +389,12 @@ export async function POST(request: Request) {
               });
 
               await tx.conversation.update({
-                where: { id: currentConversationId },
-                data: { updatedAt: new Date() },
+                where: {
+                  id: currentConversationId,
+                },
+                data: {
+                  updatedAt: new Date(),
+                },
               });
             });
           }
@@ -314,15 +416,18 @@ export async function POST(request: Request) {
           finished = true;
           clearInterval(renewalInterval);
 
-          request.signal.removeEventListener("abort", abortGeneration);
+          request.signal.removeEventListener(
+            "abort",
+            abortGeneration,
+          );
 
           await releaseLock();
         }
       },
 
       cancel() {
-        // Não libera o bloqueio aqui.
-        // O finally da geração fará isso.
+        // Solicita o cancelamento.
+        // A liberação acontece no finally.
         abortGeneration();
       },
     });
@@ -341,7 +446,9 @@ export async function POST(request: Request) {
     console.error("Erro na API de chat:", error);
 
     return Response.json(
-      { error: "Não foi possível gerar a resposta." },
+      {
+        error: "Não foi possível gerar a resposta.",
+      },
       { status: 500 },
     );
   } finally {

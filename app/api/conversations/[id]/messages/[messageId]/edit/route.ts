@@ -19,10 +19,7 @@ type RouteContext = {
 };
 
 type StreamEvent =
-  | {
-      type: "chunk";
-      content: string;
-    }
+  | { type: "chunk"; content: string }
   | {
       type: "done";
       conversationId: string;
@@ -34,10 +31,7 @@ type StreamEvent =
         content: string;
       };
     }
-  | {
-      type: "error";
-      error: string;
-    };
+  | { type: "error"; error: string };
 
 const LOCK_RENEW_INTERVAL_MS = 30_000;
 
@@ -83,16 +77,13 @@ export async function POST(
 
     const { id, messageId } = await params;
 
-    const conversation =
-      await prisma.conversation.findFirst({
-        where: {
-          id,
-          userId: user.id,
-        },
-        select: {
-          id: true,
-        },
-      });
+    const conversation = await prisma.conversation.findFirst({
+      where: {
+        id,
+        userId: user.id,
+      },
+      select: { id: true },
+    });
 
     if (!conversation) {
       return Response.json(
@@ -132,7 +123,7 @@ export async function POST(
       );
     }
 
-    // Bloqueia a conversa antes de consultar o histórico.
+    // Impede outra operação simultânea na conversa.
     lockToken = await acquireConversationLock(id);
 
     if (!lockToken) {
@@ -146,13 +137,10 @@ export async function POST(
     }
 
     lockedConversationId = id;
-
     const currentLockToken = lockToken;
 
     const savedMessages = await prisma.message.findMany({
-      where: {
-        conversationId: id,
-      },
+      where: { conversationId: id },
       orderBy: [
         { position: "asc" },
         { createdAt: "asc" },
@@ -206,9 +194,7 @@ export async function POST(
 
     if (messages.length > 30) {
       return Response.json(
-        {
-          error: "Histórico muito longo para regenerar.",
-        },
+        { error: "Histórico muito longo para regenerar." },
         { status: 400 },
       );
     }
@@ -226,9 +212,7 @@ export async function POST(
             "Retry-After": String(
               Math.max(
                 1,
-                Math.ceil(
-                  (limit.reset - Date.now()) / 1000,
-                ),
+                Math.ceil((limit.reset - Date.now()) / 1000),
               ),
             ),
           },
@@ -242,15 +226,61 @@ export async function POST(
     const editedContent = parsed.data.content;
     const targetPosition = target.position;
 
-    // Controlador independente para interromper o Gemini.
+    // Assume uma nova versão da conversa.
+    // O incremento acontece sob bloqueio de linha.
+    const generationVersion = await prisma.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`
+          SELECT id
+          FROM "Conversation"
+          WHERE id = ${id}
+          FOR UPDATE
+        `;
+
+        const currentMessages = await tx.message.findMany({
+          where: { conversationId: id },
+          orderBy: [
+            { position: "asc" },
+            { createdAt: "asc" },
+            { id: "asc" },
+          ],
+          select: {
+            id: true,
+            role: true,
+            content: true,
+            position: true,
+          },
+        });
+
+        if (
+          JSON.stringify(currentMessages) !==
+          expectedSignature
+        ) {
+          throw new Error("HISTORY_CHANGED");
+        }
+
+        const updated = await tx.conversation.update({
+          where: { id },
+          data: {
+            generationVersion: {
+              increment: 1,
+            },
+          },
+          select: {
+            generationVersion: true,
+          },
+        });
+
+        return updated.generationVersion;
+      },
+    );
+
     const generationController = new AbortController();
 
     const abortGeneration = () => {
       generationController.abort();
     };
 
-    // Aqui é necessário verificar request.signal,
-    // não generationController.signal.
     if (request.signal.aborted) {
       abortGeneration();
     } else {
@@ -273,7 +303,6 @@ export async function POST(
         "abort",
         abortGeneration,
       );
-
       throw error;
     }
 
@@ -330,13 +359,11 @@ export async function POST(
               ),
             );
           } catch {
-            // O cliente pode ter encerrado a leitura.
             abortGeneration();
           }
         }
 
         try {
-          // A verificação solicitada fica exatamente aqui.
           for await (const chunk of geminiStream) {
             if (
               generationController.signal.aborted ||
@@ -357,12 +384,10 @@ export async function POST(
             });
           }
 
-          // Verifica primeiro a perda do bloqueio.
           if (lockLost) {
             throw new Error("LOCK_LOST");
           }
 
-          // Cancelamento solicitado pelo usuário.
           if (generationController.signal.aborted) {
             return;
           }
@@ -373,7 +398,6 @@ export async function POST(
             );
           }
 
-          // Confirma a posse do bloqueio antes de salvar.
           const lockStillValid =
             await renewConversationLock(
               id,
@@ -397,11 +421,25 @@ export async function POST(
                 FOR UPDATE
               `;
 
+              const currentConversation =
+                await tx.conversation.findUnique({
+                  where: { id },
+                  select: {
+                    generationVersion: true,
+                  },
+                });
+
+              if (
+                !currentConversation ||
+                currentConversation.generationVersion !==
+                  generationVersion
+              ) {
+                throw new Error("GENERATION_SUPERSEDED");
+              }
+
               const currentMessages =
                 await tx.message.findMany({
-                  where: {
-                    conversationId: id,
-                  },
+                  where: { conversationId: id },
                   orderBy: [
                     { position: "asc" },
                     { createdAt: "asc" },
@@ -432,9 +470,7 @@ export async function POST(
               });
 
               await tx.message.update({
-                where: {
-                  id: target.id,
-                },
+                where: { id: target.id },
                 data: {
                   content: editedContent,
                 },
@@ -450,12 +486,8 @@ export async function POST(
               });
 
               await tx.conversation.update({
-                where: {
-                  id,
-                },
-                data: {
-                  updatedAt: new Date(),
-                },
+                where: { id },
+                data: { updatedAt: new Date() },
               });
 
               return created;
@@ -485,13 +517,17 @@ export async function POST(
               error.message === "HISTORY_CHANGED"
                 ? "O histórico mudou durante a geração. Recarregue a conversa."
                 : error instanceof Error &&
-                    error.message === "LOCK_LOST"
-                  ? "O bloqueio da conversa expirou. Tente novamente."
+                    error.message ===
+                      "GENERATION_SUPERSEDED"
+                  ? "Outra operação assumiu esta conversa. Recarregue o histórico."
                   : error instanceof Error &&
-                      error.message ===
-                        "A IA retornou uma resposta vazia."
-                    ? error.message
-                    : "Não foi possível concluir a edição.";
+                      error.message === "LOCK_LOST"
+                    ? "O bloqueio da conversa expirou. Tente novamente."
+                    : error instanceof Error &&
+                        error.message ===
+                          "A IA retornou uma resposta vazia."
+                      ? error.message
+                      : "Não foi possível concluir a edição.";
 
             sendEvent({
               type: "error",
@@ -507,7 +543,6 @@ export async function POST(
             abortGeneration,
           );
 
-          // Libera somente após o processamento terminar.
           await releaseLock();
 
           try {
@@ -519,8 +554,8 @@ export async function POST(
       },
 
       cancel() {
-        // Não libera o bloqueio aqui.
-        // Solicita o encerramento da geração.
+        // Apenas solicita o encerramento.
+        // O finally libera o bloqueio.
         abortGeneration();
       },
     });

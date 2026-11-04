@@ -28,6 +28,7 @@ export function useChat() {
   }
 
   
+
 async function sendMessage(content: string) {
   const cleanContent = content.trim();
 
@@ -81,29 +82,26 @@ async function sendMessage(content: string) {
       currentConversationId,
     );
 
+    if (controller.signal.aborted) return;
+
     const savedConversationId =
       response.headers.get("X-Conversation-Id");
 
     if (!savedConversationId) {
-      throw new Error(
-        "A API não retornou o ID da conversa.",
-      );
+      throw new Error("A API não retornou o ID da conversa.");
     }
 
     conversationIdRef.current = savedConversationId;
     setConversationId(savedConversationId);
 
-    // Busca as mensagens com IDs definitivos do banco.
     const historyResponse = await fetch(
       `/api/conversations/${encodeURIComponent(savedConversationId)}`,
-      {
-        cache: "no-store",
-      },
+      { cache: "no-store" },
     );
 
     if (!historyResponse.ok) {
       throw new Error(
-        "A resposta foi gerada, mas não foi possível sincronizar o histórico.",
+        "Não foi possível sincronizar o histórico.",
       );
     }
 
@@ -112,26 +110,40 @@ async function sendMessage(content: string) {
       messages: ChatMessage[];
     };
 
-    // Substitui o estado, sem concatenar mensagens novamente.
-    updateMessages(savedConversation.messages);
+    if (controller.signal.aborted) return;
 
-    setStatus("idle");
+    updateMessages(savedConversation.messages);
     void loadConversations();
   } catch (err) {
+    if (!controller.signal.aborted) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Erro inesperado.",
+      );
+      setStatus("error");
+    }
+  } finally {
     if (controller.signal.aborted) {
-      setStatus("idle");
-      return;
+      // Remove somente o placeholder vazio desta geração.
+      updateMessages(
+        messagesRef.current.filter(
+          (message) =>
+            message.id !== assistantMessage.id ||
+            message.content.trim().length > 0,
+        ),
+      );
     }
 
-    // Mantém as mensagens visíveis se a sincronização falhar.
-    setError(
-      err instanceof Error
-        ? err.message
-        : "Erro inesperado.",
-    );
-    setStatus("error");
-  } finally {
     controllerRef.current = null;
+
+    if (controller.signal.aborted) {
+      setStatus("idle");
+    } else {
+      setStatus((current) =>
+        current === "streaming" ? "idle" : current,
+      );
+    }
   }
 }
 
