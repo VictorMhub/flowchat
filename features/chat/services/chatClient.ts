@@ -1,48 +1,64 @@
 import type { ChatMessage } from "../types/chat.types";
 
 // A API retorna texto puro em streaming.
+
 export async function streamChat(
   messages: ChatMessage[],
   signal: AbortSignal,
   onChunk: (chunk: string) => void,
   conversationId: string | null,
-): Promise<Response> {
+): Promise<string> {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      messages,
-      conversationId,
-    }),
+    body: JSON.stringify({ messages, conversationId }),
     signal,
   });
 
-  
-if (!response.ok) {
-  const data: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const data: unknown = await response.json().catch(() => null);
 
-  const message =
-    typeof data === "object" &&
-    data !== null &&
-    "error" in data &&
-    typeof data.error === "string"
-      ? data.error
-      : response.status === 429
-        ? "Limite de uso atingido. Tente novamente mais tarde."
+    const message =
+      typeof data === "object" &&
+      data !== null &&
+      "error" in data &&
+      typeof data.error === "string"
+        ? data.error
         : "Não foi possível gerar a resposta.";
 
-  throw new Error(message);
-}
-
+    throw new Error(message);
+  }
 
   if (!response.body) {
     throw new Error("Resposta sem streaming.");
   }
 
+  type ChatEvent =
+    | { type: "chunk"; content: string }
+    | { type: "done"; conversationId: string }
+    | { type: "error"; error: string };
+
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
+
+  let buffer = "";
+  let savedConversationId: string | null = null;
+
+  function processLine(line: string) {
+    if (!line.trim()) return;
+
+    const event = JSON.parse(line) as ChatEvent;
+
+    if (event.type === "chunk") {
+      onChunk(event.content);
+    } else if (event.type === "done") {
+      savedConversationId = event.conversationId;
+    } else if (event.type === "error") {
+      throw new Error(event.error);
+    }
+  }
 
   try {
     while (true) {
@@ -50,20 +66,34 @@ if (!response.ok) {
 
       if (done) break;
 
-      onChunk(decoder.decode(value, { stream: true }));
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        processLine(line);
+      }
     }
 
-    const remaining = decoder.decode();
+    buffer += decoder.decode();
 
-    if (remaining) {
-      onChunk(remaining);
+    if (buffer.trim()) {
+      processLine(buffer);
     }
 
-    return response;
+    if (!savedConversationId) {
+      throw new Error(
+        "A geração terminou sem confirmação de salvamento.",
+      );
+    }
+
+    return savedConversationId;
   } finally {
     reader.releaseLock();
   }
 }
+
 
 export type EditMessageResult = {
   conversationId: string;

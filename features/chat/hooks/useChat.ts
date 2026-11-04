@@ -60,7 +60,7 @@ export function useChat() {
     setError(null);
 
     try {
-      const response = await streamChat(
+      const savedConversationId = await streamChat(
         history,
         controller.signal,
         (chunk) => {
@@ -81,12 +81,6 @@ export function useChat() {
       );
 
       if (controller.signal.aborted) return;
-
-      const savedConversationId = response.headers.get("X-Conversation-Id");
-
-      if (!savedConversationId) {
-        throw new Error("A API não retornou o ID da conversa.");
-      }
 
       conversationIdRef.current = savedConversationId;
       setConversationId(savedConversationId);

@@ -13,6 +13,11 @@ import { checkDailyQuota } from "@/server/security/dailyQuota";
 import { getAIErrorMessage, isGeminiQuotaError } from "@/server/ai/aiErrors";
 const LOCK_RENEW_INTERVAL_MS = 30_000;
 
+type ChatStreamEvent =
+  | { type: "chunk"; content: string }
+  | { type: "done"; conversationId: string }
+  | { type: "error"; error: string };
+
 export async function POST(request: Request) {
   let lockedConversationId: string | null = null;
   let lockToken: string | null = null;
@@ -248,6 +253,18 @@ export async function POST(request: Request) {
         let finished = false;
         let renewing = false;
 
+        function sendEvent(event: ChatStreamEvent) {
+          if (generationController.signal.aborted || lockLost) {
+            return;
+          }
+
+          try {
+            controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
+          } catch {
+            abortGeneration();
+          }
+        }
+
         const renewalInterval = setInterval(() => {
           if (finished || renewing) return;
 
@@ -281,7 +298,11 @@ export async function POST(request: Request) {
 
             if (text) {
               assistantContent += text;
-              controller.enqueue(encoder.encode(text));
+
+              sendEvent({
+                type: "chunk",
+                content: text,
+              });
             }
           }
 
@@ -363,19 +384,33 @@ export async function POST(request: Request) {
           }
 
           if (!generationController.signal.aborted) {
+            if (!assistantContent.trim()) {
+              throw new Error("A IA retornou uma resposta vazia.");
+            }
+
+            sendEvent({
+              type: "done",
+              conversationId: currentConversationId,
+            });
+
             controller.close();
           }
         } catch (error) {
-          if (!generationController.signal.aborted) {
-            console.error("Erro no streaming:", error);
+  if (!generationController.signal.aborted) {
+    console.error("Erro no streaming:", error);
 
-            try {
-              controller.error(error);
-            } catch {
-              // A leitura pode já ter sido cancelada.
-            }
-          }
-        } finally {
+    sendEvent({
+      type: "error",
+      error: getAIErrorMessage(error),
+    });
+
+    try {
+      controller.close();
+    } catch {
+      // A leitura pode já ter sido cancelada.
+    }
+  }
+} finally {
           finished = true;
           clearInterval(renewalInterval);
 
@@ -396,7 +431,7 @@ export async function POST(request: Request) {
 
     return new Response(stream, {
       headers: {
-        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Type": "application/x-ndjson; charset=utf-8",
         "Cache-Control": "no-cache, no-transform",
         "X-Content-Type-Options": "nosniff",
         "X-Conversation-Id": currentConversationId,
