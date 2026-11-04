@@ -1,4 +1,3 @@
-
 import { auth } from "@/auth";
 import { editMessageSchema } from "@/features/chat/schemas/message.schema";
 import { generateChatStream } from "@/server/ai/aiGateway";
@@ -10,6 +9,7 @@ import {
   renewConversationLock,
 } from "@/server/security/conversationLock";
 import { chatRateLimit } from "@/server/security/rateLimit";
+import { checkDailyQuota } from "@/server/security/dailyQuota";
 
 type RouteContext = {
   params: Promise<{
@@ -35,10 +35,7 @@ type StreamEvent =
 
 const LOCK_RENEW_INTERVAL_MS = 30_000;
 
-export async function POST(
-  request: Request,
-  { params }: RouteContext,
-) {
+export async function POST(request: Request, { params }: RouteContext) {
   let lockedConversationId: string | null = null;
   let lockToken: string | null = null;
   let lockTransferredToStream = false;
@@ -47,10 +44,7 @@ export async function POST(
     if (!lockedConversationId || !lockToken) return;
 
     try {
-      await releaseConversationLock(
-        lockedConversationId,
-        lockToken,
-      );
+      await releaseConversationLock(lockedConversationId, lockToken);
     } catch (error) {
       console.error("Erro ao liberar bloqueio:", error);
     }
@@ -60,19 +54,13 @@ export async function POST(
     const session = await auth();
 
     if (!session?.user?.email) {
-      return Response.json(
-        { error: "Não autenticado." },
-        { status: 401 },
-      );
+      return Response.json({ error: "Não autenticado." }, { status: 401 });
     }
 
     const user = await getCurrentUser();
 
     if (!user) {
-      return Response.json(
-        { error: "Não autorizado." },
-        { status: 401 },
-      );
+      return Response.json({ error: "Não autorizado." }, { status: 401 });
     }
 
     const { id, messageId } = await params;
@@ -92,9 +80,7 @@ export async function POST(
       );
     }
 
-    const contentLength = Number(
-      request.headers.get("content-length") ?? 0,
-    );
+    const contentLength = Number(request.headers.get("content-length") ?? 0);
 
     if (contentLength > 100_000) {
       return Response.json(
@@ -108,19 +94,13 @@ export async function POST(
     try {
       body = await request.json();
     } catch {
-      return Response.json(
-        { error: "JSON inválido." },
-        { status: 400 },
-      );
+      return Response.json({ error: "JSON inválido." }, { status: 400 });
     }
 
     const parsed = editMessageSchema.safeParse(body);
 
     if (!parsed.success) {
-      return Response.json(
-        { error: "Conteúdo inválido." },
-        { status: 400 },
-      );
+      return Response.json({ error: "Conteúdo inválido." }, { status: 400 });
     }
 
     // Impede outra operação simultânea na conversa.
@@ -129,8 +109,7 @@ export async function POST(
     if (!lockToken) {
       return Response.json(
         {
-          error:
-            "Esta conversa já possui uma operação em andamento. Aguarde.",
+          error: "Esta conversa já possui uma operação em andamento. Aguarde.",
         },
         { status: 409 },
       );
@@ -141,11 +120,7 @@ export async function POST(
 
     const savedMessages = await prisma.message.findMany({
       where: { conversationId: id },
-      orderBy: [
-        { position: "asc" },
-        { createdAt: "asc" },
-        { id: "asc" },
-      ],
+      orderBy: [{ position: "asc" }, { createdAt: "asc" }, { id: "asc" }],
       select: {
         id: true,
         role: true,
@@ -155,9 +130,7 @@ export async function POST(
     });
 
     const target = savedMessages.find(
-      (message) =>
-        message.id === messageId &&
-        message.role === "user",
+      (message) => message.id === messageId && message.role === "user",
     );
 
     if (!target || target.position === null) {
@@ -169,16 +142,13 @@ export async function POST(
 
     const previousMessages = savedMessages.filter(
       (message) =>
-        message.position !== null &&
-        message.position < target.position!,
+        message.position !== null && message.position < target.position!,
     );
 
     const messages = [
       ...previousMessages
         .filter(
-          (message) =>
-            message.role === "user" ||
-            message.role === "assistant",
+          (message) => message.role === "user" || message.role === "assistant",
         )
         .map((message) => ({
           id: message.id,
@@ -199,9 +169,7 @@ export async function POST(
       );
     }
 
-    const limit = await chatRateLimit.limit(
-      `user:${user.id}`,
-    );
+    const limit = await chatRateLimit.limit(`user:${user.id}`);
 
     if (!limit.success) {
       return Response.json(
@@ -210,70 +178,76 @@ export async function POST(
           status: 429,
           headers: {
             "Retry-After": String(
-              Math.max(
-                1,
-                Math.ceil((limit.reset - Date.now()) / 1000),
-              ),
+              Math.max(1, Math.ceil((limit.reset - Date.now()) / 1000)),
             ),
           },
         },
       );
     }
 
-    const expectedSignature =
-      JSON.stringify(savedMessages);
+    const quota = await checkDailyQuota(user.id);
+
+    if (!quota.allowed) {
+      return Response.json(
+        {
+          error:
+            quota.reason === "user"
+              ? "Você atingiu seu limite diário de mensagens. Tente novamente mais tarde."
+              : "O limite diário de uso do Flowchat foi atingido. Tente novamente mais tarde.",
+        },
+        {
+          status: 429,
+          headers: {
+            "Retry-After": String(quota.retryAfter),
+          },
+        },
+      );
+    }
+
+    const expectedSignature = JSON.stringify(savedMessages);
 
     const editedContent = parsed.data.content;
     const targetPosition = target.position;
 
     // Assume uma nova versão da conversa.
     // O incremento acontece sob bloqueio de linha.
-    const generationVersion = await prisma.$transaction(
-      async (tx) => {
-        await tx.$queryRaw`
+    const generationVersion = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`
           SELECT id
           FROM "Conversation"
           WHERE id = ${id}
           FOR UPDATE
         `;
 
-        const currentMessages = await tx.message.findMany({
-          where: { conversationId: id },
-          orderBy: [
-            { position: "asc" },
-            { createdAt: "asc" },
-            { id: "asc" },
-          ],
-          select: {
-            id: true,
-            role: true,
-            content: true,
-            position: true,
-          },
-        });
+      const currentMessages = await tx.message.findMany({
+        where: { conversationId: id },
+        orderBy: [{ position: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+        select: {
+          id: true,
+          role: true,
+          content: true,
+          position: true,
+        },
+      });
 
-        if (
-          JSON.stringify(currentMessages) !==
-          expectedSignature
-        ) {
-          throw new Error("HISTORY_CHANGED");
-        }
+      if (JSON.stringify(currentMessages) !== expectedSignature) {
+        throw new Error("HISTORY_CHANGED");
+      }
 
-        const updated = await tx.conversation.update({
-          where: { id },
-          data: {
-            generationVersion: {
-              increment: 1,
-            },
+      const updated = await tx.conversation.update({
+        where: { id },
+        data: {
+          generationVersion: {
+            increment: 1,
           },
-          select: {
-            generationVersion: true,
-          },
-        });
+        },
+        select: {
+          generationVersion: true,
+        },
+      });
 
-        return updated.generationVersion;
-      },
-    );
+      return updated.generationVersion;
+    });
 
     const generationController = new AbortController();
 
@@ -284,11 +258,7 @@ export async function POST(
     if (request.signal.aborted) {
       abortGeneration();
     } else {
-      request.signal.addEventListener(
-        "abort",
-        abortGeneration,
-        { once: true },
-      );
+      request.signal.addEventListener("abort", abortGeneration, { once: true });
     }
 
     let geminiStream;
@@ -299,10 +269,7 @@ export async function POST(
         generationController.signal,
       );
     } catch (error) {
-      request.signal.removeEventListener(
-        "abort",
-        abortGeneration,
-      );
+      request.signal.removeEventListener("abort", abortGeneration);
       throw error;
     }
 
@@ -320,10 +287,7 @@ export async function POST(
 
           renewing = true;
 
-          void renewConversationLock(
-            id,
-            currentLockToken,
-          )
+          void renewConversationLock(id, currentLockToken)
             .then((renewed) => {
               if (!renewed) {
                 lockLost = true;
@@ -334,10 +298,7 @@ export async function POST(
               lockLost = true;
               abortGeneration();
 
-              console.error(
-                "Erro ao renovar bloqueio:",
-                error,
-              );
+              console.error("Erro ao renovar bloqueio:", error);
             })
             .finally(() => {
               renewing = false;
@@ -345,19 +306,12 @@ export async function POST(
         }, LOCK_RENEW_INTERVAL_MS);
 
         function sendEvent(event: StreamEvent) {
-          if (
-            generationController.signal.aborted ||
-            lockLost
-          ) {
+          if (generationController.signal.aborted || lockLost) {
             return;
           }
 
           try {
-            controller.enqueue(
-              encoder.encode(
-                JSON.stringify(event) + "\n",
-              ),
-            );
+            controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
           } catch {
             abortGeneration();
           }
@@ -365,10 +319,7 @@ export async function POST(
 
         try {
           for await (const chunk of geminiStream) {
-            if (
-              generationController.signal.aborted ||
-              lockLost
-            ) {
+            if (generationController.signal.aborted || lockLost) {
               break;
             }
 
@@ -393,16 +344,13 @@ export async function POST(
           }
 
           if (!assistantContent.trim()) {
-            throw new Error(
-              "A IA retornou uma resposta vazia.",
-            );
+            throw new Error("A IA retornou uma resposta vazia.");
           }
 
-          const lockStillValid =
-            await renewConversationLock(
-              id,
-              currentLockToken,
-            );
+          const lockStillValid = await renewConversationLock(
+            id,
+            currentLockToken,
+          );
 
           if (!lockStillValid) {
             throw new Error("LOCK_LOST");
@@ -412,87 +360,79 @@ export async function POST(
             return;
           }
 
-          const assistant = await prisma.$transaction(
-            async (tx) => {
-              await tx.$queryRaw`
+          const assistant = await prisma.$transaction(async (tx) => {
+            await tx.$queryRaw`
                 SELECT id
                 FROM "Conversation"
                 WHERE id = ${id}
                 FOR UPDATE
               `;
 
-              const currentConversation =
-                await tx.conversation.findUnique({
-                  where: { id },
-                  select: {
-                    generationVersion: true,
-                  },
-                });
+            const currentConversation = await tx.conversation.findUnique({
+              where: { id },
+              select: {
+                generationVersion: true,
+              },
+            });
 
-              if (
-                !currentConversation ||
-                currentConversation.generationVersion !==
-                  generationVersion
-              ) {
-                throw new Error("GENERATION_SUPERSEDED");
-              }
+            if (
+              !currentConversation ||
+              currentConversation.generationVersion !== generationVersion
+            ) {
+              throw new Error("GENERATION_SUPERSEDED");
+            }
 
-              const currentMessages =
-                await tx.message.findMany({
-                  where: { conversationId: id },
-                  orderBy: [
-                    { position: "asc" },
-                    { createdAt: "asc" },
-                    { id: "asc" },
-                  ],
-                  select: {
-                    id: true,
-                    role: true,
-                    content: true,
-                    position: true,
-                  },
-                });
+            const currentMessages = await tx.message.findMany({
+              where: { conversationId: id },
+              orderBy: [
+                { position: "asc" },
+                { createdAt: "asc" },
+                { id: "asc" },
+              ],
+              select: {
+                id: true,
+                role: true,
+                content: true,
+                position: true,
+              },
+            });
 
-              if (
-                JSON.stringify(currentMessages) !==
-                expectedSignature
-              ) {
-                throw new Error("HISTORY_CHANGED");
-              }
+            if (JSON.stringify(currentMessages) !== expectedSignature) {
+              throw new Error("HISTORY_CHANGED");
+            }
 
-              await tx.message.deleteMany({
-                where: {
-                  conversationId: id,
-                  position: {
-                    gt: targetPosition,
-                  },
+            await tx.message.deleteMany({
+              where: {
+                conversationId: id,
+                position: {
+                  gt: targetPosition,
                 },
-              });
+              },
+            });
 
-              await tx.message.update({
-                where: { id: target.id },
-                data: {
-                  content: editedContent,
-                },
-              });
+            await tx.message.update({
+              where: { id: target.id },
+              data: {
+                content: editedContent,
+              },
+            });
 
-              const created = await tx.message.create({
-                data: {
-                  conversationId: id,
-                  role: "assistant",
-                  content: assistantContent,
-                  position: targetPosition + 1,
-                },
-              });
+            const created = await tx.message.create({
+              data: {
+                conversationId: id,
+                role: "assistant",
+                content: assistantContent,
+                position: targetPosition + 1,
+              },
+            });
 
-              await tx.conversation.update({
-                where: { id },
-                data: { updatedAt: new Date() },
-              });
+            await tx.conversation.update({
+              where: { id },
+              data: { updatedAt: new Date() },
+            });
 
-              return created;
-            },
-          );
+            return created;
+          });
 
           sendEvent({
             type: "done",
@@ -507,25 +447,18 @@ export async function POST(
           });
         } catch (error) {
           if (!generationController.signal.aborted) {
-            console.error(
-              "Erro ao editar mensagem:",
-              error,
-            );
+            console.error("Erro ao editar mensagem:", error);
 
             const message =
-              error instanceof Error &&
-              error.message === "HISTORY_CHANGED"
+              error instanceof Error && error.message === "HISTORY_CHANGED"
                 ? "O histórico mudou durante a geração. Recarregue a conversa."
                 : error instanceof Error &&
-                    error.message ===
-                      "GENERATION_SUPERSEDED"
+                    error.message === "GENERATION_SUPERSEDED"
                   ? "Outra operação assumiu esta conversa. Recarregue o histórico."
-                  : error instanceof Error &&
-                      error.message === "LOCK_LOST"
+                  : error instanceof Error && error.message === "LOCK_LOST"
                     ? "O bloqueio da conversa expirou. Tente novamente."
                     : error instanceof Error &&
-                        error.message ===
-                          "A IA retornou uma resposta vazia."
+                        error.message === "A IA retornou uma resposta vazia."
                       ? error.message
                       : "Não foi possível concluir a edição.";
 
@@ -538,10 +471,7 @@ export async function POST(
           finished = true;
           clearInterval(renewalInterval);
 
-          request.signal.removeEventListener(
-            "abort",
-            abortGeneration,
-          );
+          request.signal.removeEventListener("abort", abortGeneration);
 
           await releaseLock();
 
@@ -565,17 +495,13 @@ export async function POST(
     return new Response(stream, {
       status: 200,
       headers: {
-        "Content-Type":
-          "application/x-ndjson; charset=utf-8",
+        "Content-Type": "application/x-ndjson; charset=utf-8",
         "Cache-Control": "no-cache, no-transform",
         "X-Content-Type-Options": "nosniff",
       },
     });
   } catch (error) {
-    console.error(
-      "Erro ao iniciar edição:",
-      error,
-    );
+    console.error("Erro ao iniciar edição:", error);
 
     return Response.json(
       {
