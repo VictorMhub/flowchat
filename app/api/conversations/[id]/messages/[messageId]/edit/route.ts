@@ -11,6 +11,7 @@ import {
 import { chatRateLimit } from "@/server/security/rateLimit";
 import { checkDailyQuota } from "@/server/security/dailyQuota";
 import { getAIErrorMessage, isGeminiQuotaError } from "@/server/ai/aiErrors";
+import { recordTokenUsage, type TokenUsage } from "@/server/ai/tokenUsage";
 type RouteContext = {
   params: Promise<{
     id: string;
@@ -281,6 +282,7 @@ export async function POST(request: Request, { params }: RouteContext) {
         let finished = false;
         let lockLost = false;
         let renewing = false;
+        let latestUsage: TokenUsage | null = null;
 
         const renewalInterval = setInterval(() => {
           if (finished || renewing) return;
@@ -321,6 +323,14 @@ export async function POST(request: Request, { params }: RouteContext) {
           for await (const chunk of geminiStream) {
             if (generationController.signal.aborted || lockLost) {
               break;
+            }
+
+            if (chunk.usageMetadata) {
+              latestUsage = {
+                inputTokens: chunk.usageMetadata.promptTokenCount ?? 0,
+                outputTokens: chunk.usageMetadata.candidatesTokenCount ?? 0,
+                totalTokens: chunk.usageMetadata.totalTokenCount ?? 0,
+              };
             }
 
             const text = chunk.text ?? "";
@@ -472,6 +482,14 @@ export async function POST(request: Request, { params }: RouteContext) {
           clearInterval(renewalInterval);
 
           request.signal.removeEventListener("abort", abortGeneration);
+
+          if (latestUsage) {
+            try {
+              await recordTokenUsage(user.id, latestUsage);
+            } catch (error) {
+              console.error("Erro ao registrar tokens:", error);
+            }
+          }
 
           await releaseLock();
 

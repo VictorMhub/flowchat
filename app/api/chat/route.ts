@@ -11,6 +11,7 @@ import {
 import { chatRateLimit } from "@/server/security/rateLimit";
 import { checkDailyQuota } from "@/server/security/dailyQuota";
 import { getAIErrorMessage, isGeminiQuotaError } from "@/server/ai/aiErrors";
+import { recordTokenUsage, type TokenUsage } from "@/server/ai/tokenUsage";
 const LOCK_RENEW_INTERVAL_MS = 30_000;
 
 type ChatStreamEvent =
@@ -287,11 +288,18 @@ export async function POST(request: Request) {
               renewing = false;
             });
         }, LOCK_RENEW_INTERVAL_MS);
-
+        let latestUsage: TokenUsage | null = null;
         try {
           for await (const chunk of geminiStream) {
             if (generationController.signal.aborted || lockLost) {
               break;
+            }
+            if (chunk.usageMetadata) {
+              latestUsage = {
+                inputTokens: chunk.usageMetadata.promptTokenCount ?? 0,
+                outputTokens: chunk.usageMetadata.candidatesTokenCount ?? 0,
+                totalTokens: chunk.usageMetadata.totalTokenCount ?? 0,
+              };
             }
 
             const text = chunk.text;
@@ -396,25 +404,34 @@ export async function POST(request: Request) {
             controller.close();
           }
         } catch (error) {
-  if (!generationController.signal.aborted) {
-    console.error("Erro no streaming:", error);
+          if (!generationController.signal.aborted) {
+            console.error("Erro no streaming:", error);
 
-    sendEvent({
-      type: "error",
-      error: getAIErrorMessage(error),
-    });
+            sendEvent({
+              type: "error",
+              error: getAIErrorMessage(error),
+            });
 
-    try {
-      controller.close();
-    } catch {
-      // A leitura pode já ter sido cancelada.
-    }
-  }
-} finally {
+            try {
+              controller.close();
+            } catch {
+              // A leitura pode já ter sido cancelada.
+            }
+          }
+        } finally {
           finished = true;
           clearInterval(renewalInterval);
 
           request.signal.removeEventListener("abort", abortGeneration);
+
+          // Registra os tokens consumidos pelo Gemini.
+          if (latestUsage) {
+            try {
+              await recordTokenUsage(user.id, latestUsage);
+            } catch (error) {
+              console.error("Erro ao registrar tokens:", error);
+            }
+          }
 
           await releaseLock();
         }
