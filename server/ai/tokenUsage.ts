@@ -21,6 +21,7 @@ export async function recordTokenUsage(userId: string, usage: TokenUsage) {
     pipeline.hincrby(key, "input", usage.inputTokens);
     pipeline.hincrby(key, "output", usage.outputTokens);
     pipeline.hincrby(key, "total", usage.totalTokens);
+    pipeline.hincrby(key, "requests", 1);
     pipeline.expire(key, 60 * 60 * 24 * 30);
   }
 
