@@ -10,7 +10,7 @@ import {
 } from "@/server/security/conversationLock";
 import { chatRateLimit } from "@/server/security/rateLimit";
 import { checkDailyQuota } from "@/server/security/dailyQuota";
-
+import { getAIErrorMessage, isGeminiQuotaError } from "@/server/ai/aiErrors";
 const LOCK_RENEW_INTERVAL_MS = 30_000;
 
 export async function POST(request: Request) {
@@ -407,9 +407,9 @@ export async function POST(request: Request) {
 
     return Response.json(
       {
-        error: "Não foi possível gerar a resposta.",
+        error: getAIErrorMessage(error),
       },
-      { status: 500 },
+      { status: isGeminiQuotaError(error) ? 429 : 500 },
     );
   } finally {
     if (!lockTransferredToStream) {

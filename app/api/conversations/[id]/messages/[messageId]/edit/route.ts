@@ -10,7 +10,7 @@ import {
 } from "@/server/security/conversationLock";
 import { chatRateLimit } from "@/server/security/rateLimit";
 import { checkDailyQuota } from "@/server/security/dailyQuota";
-
+import { getAIErrorMessage, isGeminiQuotaError } from "@/server/ai/aiErrors";
 type RouteContext = {
   params: Promise<{
     id: string;
@@ -460,7 +460,7 @@ export async function POST(request: Request, { params }: RouteContext) {
                     : error instanceof Error &&
                         error.message === "A IA retornou uma resposta vazia."
                       ? error.message
-                      : "Não foi possível concluir a edição.";
+                      : getAIErrorMessage(error);
 
             sendEvent({
               type: "error",
@@ -504,10 +504,8 @@ export async function POST(request: Request, { params }: RouteContext) {
     console.error("Erro ao iniciar edição:", error);
 
     return Response.json(
-      {
-        error: "Não foi possível iniciar a edição.",
-      },
-      { status: 500 },
+      { error: getAIErrorMessage(error) },
+      { status: isGeminiQuotaError(error) ? 429 : 500 },
     );
   } finally {
     if (!lockTransferredToStream) {

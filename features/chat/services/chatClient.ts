@@ -19,11 +19,23 @@ export async function streamChat(
     signal,
   });
 
-  if (!response.ok) {
-    const error = await response.text();
-    console.error("Erro da API:", response.status, error);
-    throw new Error(`API ${response.status}: ${error}`);
-  }
+  
+if (!response.ok) {
+  const data: unknown = await response.json().catch(() => null);
+
+  const message =
+    typeof data === "object" &&
+    data !== null &&
+    "error" in data &&
+    typeof data.error === "string"
+      ? data.error
+      : response.status === 429
+        ? "Limite de uso atingido. Tente novamente mais tarde."
+        : "Não foi possível gerar a resposta.";
+
+  throw new Error(message);
+}
+
 
   if (!response.body) {
     throw new Error("Resposta sem streaming.");
